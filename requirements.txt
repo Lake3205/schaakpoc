@@ -1,0 +1,4 @@
+# Install PyTorch with CUDA 12.8 FIRST (required for RTX 50-series / Blackwell GPUs):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+opencv-python
+ultralytics
