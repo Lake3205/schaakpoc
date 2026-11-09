@@ -8,8 +8,10 @@ from schaakgui.data import (
     class_counts,
     discover_classes,
     enabled_augmentations,
+    read_yolo_labels,
+    scan_folder,
 )
-from schaakgui.engine import Callbacks, Trainer, TrainJob
+from schaakgui.engine import Callbacks, Trainer, TrainJob, evaluate_checkpoint
 from schaakgui.projects import AugmentationConfig, QuotaConfig, TrainingConfig
 
 
@@ -37,7 +39,7 @@ def test_augmentation_pipeline_composition():
 def _job(datasets, out, **kwargs):
     defaults = dict(
         train_folders=[str(datasets["a"]), str(datasets["b"])],
-        test_folders=[str(datasets["test"])],
+        val_folders=[str(datasets["val"])],
         output_dir=str(out),
         seed=0,
         augmentation=AugmentationConfig(hflip=True),
@@ -69,13 +71,14 @@ def test_training_resume_and_lineage(datasets, tmp_path):
     assert lineage.best is not None
 
     resumed = Trainer(_job(datasets, tmp_path / "run2", train_folders=[str(datasets["a"])],
-                           test_folders=[], resume_checkpoint=summary["last_checkpoint"],
+                           val_folders=[], resume_checkpoint=summary["last_checkpoint"],
                            training=TrainingConfig(epochs=1, batch_size=8))).run()
     lineage = read_lineage(resumed["last_checkpoint"])
     assert lineage.total_epochs_completed == 3
     assert len(lineage.sessions) == 2
-    assert lineage.sessions[1]["start_epoch"] == 2 and lineage.sessions[1]["test_folders"] == []
-    assert lineage.dataset_sources()["train"] == [str(datasets["a"]), str(datasets["b"])]
+    assert lineage.sessions[1]["start_epoch"] == 2 and lineage.sessions[1]["val_folders"] == []
+    assert lineage.dataset_sources() == {"train": [str(datasets["a"]), str(datasets["b"])],
+                                         "val": [str(datasets["val"])]}
     assert [h["epoch"] for h in lineage.history] == [1, 2, 3]
 
 
@@ -105,3 +108,55 @@ def test_stop_request_and_unknown_classes(datasets, tmp_path):
                          training=TrainingConfig(epochs=1, batch_size=8, image_size=32))).run()
     with pytest.raises(ValueError, match="white-rook"):
         Trainer(_job(datasets, tmp_path / "k2", resume_checkpoint=first["last_checkpoint"])).run()
+
+
+def test_yolo_labels_are_cropped_per_box(tmp_path):
+    from conftest import make_yolo_split
+
+    split = make_yolo_split(tmp_path / "chess" / "train")
+    # The dataset root (train/valid/test splits) must not be read as classes "train", "valid", ...
+    with pytest.raises(ValueError, match="YOLO dataset"):
+        scan_folder(tmp_path / "chess")
+    for folder in (split, split / "images"):
+        assert class_counts([folder]) == {"black-king": 3, "white-king": 3}
+    ds = MultiFolderImageDataset([split], ["black-king", "white-king"])
+    assert sorted(ds.targets) == [0, 0, 0, 1, 1, 1]
+    for i, (_, target, box) in enumerate(ds.samples):
+        crop = ds.load_image(i)
+        assert crop.size == (20, 20) and box is not None
+        expected = (0, 0, 0) if target == 0 else (255, 255, 255)
+        assert all(abs(a - b) < 40 for a, b in zip(crop.getpixel((10, 10)), expected))
+
+    # Unknown names fall back to class_<id>; polygons are converted to boxes; bad lines skipped.
+    label = tmp_path / "x.txt"
+    label.write_text("3 0.1 0.2 0.5 0.2 0.5 0.6\nbad line here x y\n1 0.5 0.5 2 2\n", encoding="utf-8")
+    assert read_yolo_labels(label) == [(3, (0.1, 0.2, 0.5, 0.6)), (1, (0.0, 0.0, 1.0, 1.0))]
+    other = make_yolo_split(tmp_path / "noyaml" / "train", names=())
+    assert set(scan_folder(other)) == {"class_0", "class_1"}
+
+
+def test_yolo_training_and_final_exam(datasets, tmp_path):
+    from conftest import make_yolo_split
+
+    train = make_yolo_split(tmp_path / "yolo" / "train")
+    val = make_yolo_split(tmp_path / "yolo" / "valid")
+    summary = Trainer(_job(datasets, tmp_path / "y", train_folders=[str(train)],
+                           val_folders=[str(val)],
+                           training=TrainingConfig(epochs=1, batch_size=4, image_size=32))).run()
+    ckpt = load_checkpoint(summary["last_checkpoint"])
+    assert ckpt["classes"] == ["black-king", "white-king"]
+
+    test = make_yolo_split(tmp_path / "yolo" / "test")
+    exam = evaluate_checkpoint(summary["last_checkpoint"], [str(test)])
+    assert exam["samples"] == 6 and len(exam["confusion"]) == 2
+    assert 0.0 <= exam["accuracy"] <= 1.0 and exam["seen_in_training"] == []
+    assert evaluate_checkpoint(summary["last_checkpoint"], [str(val)])["seen_in_training"] == [str(val)]
+    with pytest.raises(ValueError):
+        evaluate_checkpoint(summary["last_checkpoint"], [])
+
+
+def test_test_folders_are_not_used_during_training(datasets, tmp_path):
+    logs = []
+    Trainer(_job(datasets, tmp_path / "t", val_folders=[]), Callbacks(log=logs.append)).run()
+    assert any("holding out 20%" in line for line in logs)
+    assert not any(str(datasets["test"]) in line for line in logs)

@@ -9,6 +9,7 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -35,9 +36,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .checkpoint import ARCHITECTURES, Lineage, read_lineage
+from .checkpoint import ARCHITECTURES, Lineage, read_lineage, session_val_folders
 from .data import class_counts, enabled_augmentations
-from .engine import TrainJob
+from .engine import TrainJob, evaluate_checkpoint
 from .plots import PlotCanvas
 from .projects import DatasetEntry, Project, ProjectManager
 from .quota import OBJECTIVES, QuotaTracker, objective_threshold
@@ -98,7 +99,8 @@ class FolderList(QGroupBox):
         layout.addLayout(buttons)
 
     def add_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select dataset folder (class_name/xxx.jpg)")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select dataset folder (class_name/xxx.jpg or YOLO images/ + labels/)")
         if folder:
             if folder in [e.path for e in self.entries()]:
                 return
@@ -143,7 +145,7 @@ class MainWindow(QMainWindow):
         self.last_checkpoint: Optional[str] = None
         self._loading = False
 
-        self.setWindowTitle("schaakpoc v2 – Chess Piece Classifier Trainer")
+        self.setWindowTitle("schaakpoc v2.1 – Chess Piece Classifier Trainer")
         self.resize(1500, 950)
         central = QWidget()
         root = QVBoxLayout(central)
@@ -188,13 +190,21 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         self.train_folders = FolderList("Training pools (check the folders to use)",
                                         self.on_datasets_changed)
-        self.test_folders = FolderList("Test / validation sets (evaluated every epoch)",
+        self.val_folders = FolderList("Validation sets (evaluated every epoch during training)",
+                                      self.on_datasets_changed)
+        self.test_folders = FolderList("Test sets (final exam – only used after training)",
                                        self.on_datasets_changed)
         layout.addWidget(self.train_folders)
+        layout.addWidget(self.val_folders)
         layout.addWidget(self.test_folders)
-        layout.addWidget(QLabel("<small>Each folder must contain one sub-folder per class: "
-                                "<code>class_name/xxx.jpg</code>. Without test folders 20% of the "
-                                "training pool is held out for validation.</small>"))
+        help_label = QLabel(
+            "<small>Folders contain one sub-folder per class (<code>class_name/xxx.jpg</code>) or are "
+            "a YOLO split (<code>images/</code> + <code>labels/</code>, class names from "
+            "<code>data.yaml</code>; every labeled box becomes one sample). Without validation "
+            "folders 20% of the training pool is held out for validation. Test folders are never "
+            "used during training: use <i>Final exam</i> / <i>Manual Review</i> after training.</small>")
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
 
         shuffle_row = QHBoxLayout()
         self.shuffle_check = QCheckBox("Shuffle training samples every epoch")
@@ -312,6 +322,7 @@ class MainWindow(QMainWindow):
         self.monitor_combo = QComboBox()
         self.monitor_combo.addItem("validation loss", "val_loss")
         self.monitor_combo.addItem("validation accuracy", "val_acc")
+        self.monitor_combo.addItem("validation loss and accuracy (stop when both stall)", "both")
         self.early_stop_check.toggled.connect(self.patience_spin.setEnabled)
         self.early_stop_check.toggled.connect(self.monitor_combo.setEnabled)
         form.addRow("Export full weights every", self.snapshot_spin)
@@ -376,11 +387,14 @@ class MainWindow(QMainWindow):
         self.pause_button = QPushButton("⏸ Pause")
         self.stop_button = QPushButton("⏹ Stop")
         self.review_button = QPushButton("🔍 Manual Review")
+        self.exam_button = QPushButton("🎓 Final exam (test sets)")
         self.start_button.clicked.connect(self.start_training)
         self.pause_button.clicked.connect(self.toggle_pause)
         self.stop_button.clicked.connect(self.stop_training)
         self.review_button.clicked.connect(self.open_review)
-        for b in (self.start_button, self.pause_button, self.stop_button, self.review_button):
+        self.exam_button.clicked.connect(self.run_final_exam)
+        for b in (self.start_button, self.pause_button, self.stop_button, self.review_button,
+                  self.exam_button):
             buttons.addWidget(b)
         layout.addLayout(buttons)
 
@@ -494,6 +508,7 @@ class MainWindow(QMainWindow):
     def _load_form(self, p: Project):
         self._loading = True
         self.train_folders.set_entries(p.train_folders)
+        self.val_folders.set_entries(p.val_folders)
         self.test_folders.set_entries(p.test_folders)
         self.shuffle_check.setChecked(p.shuffle)
         self.seed_check.setChecked(p.seed is not None)
@@ -547,6 +562,7 @@ class MainWindow(QMainWindow):
 
     def _collect_form(self, p: Project):
         p.train_folders = self.train_folders.entries()
+        p.val_folders = self.val_folders.entries()
         p.test_folders = self.test_folders.entries()
         p.shuffle = self.shuffle_check.isChecked()
         p.seed = self.seed_spin.value() if self.seed_check.isChecked() else None
@@ -597,15 +613,26 @@ class MainWindow(QMainWindow):
         missing = sorted(set(folders) - set(existing))
         if missing:
             self.log("Warning: folder(s) not found: " + ", ".join(missing))
-        return class_counts(existing)
+        counts: dict[str, int] = {}
+        for folder in existing:
+            try:
+                folder_counts = class_counts([folder])
+            except (OSError, ValueError) as e:
+                self.log(f"Warning: {e}")
+                continue
+            for name, n in folder_counts.items():
+                counts[name] = counts.get(name, 0) + n
+        return dict(sorted(counts.items()))
 
     def on_datasets_changed(self):
         if self._loading:
             return
         train = self._safe_counts(self.train_folders.checked())
+        val = self._safe_counts(self.val_folders.checked())
         test = self._safe_counts(self.test_folders.checked())
         self.balance_canvas.plot_counts(train, "Class balance – training pools")
-        self.count_canvas.plot_counts(train, "Instance Count (selected datasets)", test or None)
+        self.count_canvas.plot_counts(train, "Instance Count (selected datasets)",
+                                      {"validation": val, "test": test})
 
     def update_aug_preview(self):
         if self._loading or self.project is None:
@@ -626,6 +653,7 @@ class MainWindow(QMainWindow):
                   self.save_project_button):
             w.setEnabled(not running)
         self.review_button.setEnabled(not running)
+        self.exam_button.setEnabled(not running)
         if not running:
             self.pause_button.setText("⏸ Pause")
 
@@ -638,7 +666,7 @@ class MainWindow(QMainWindow):
         output = self.manager.project_dir(p.name) / "checkpoints" / f"run_{stamp}"
         return TrainJob(
             train_folders=p.checked_train_folders(),
-            test_folders=p.checked_test_folders(),
+            val_folders=p.checked_val_folders(),
             output_dir=str(output),
             shuffle=p.shuffle,
             seed=p.seed,
@@ -843,8 +871,8 @@ class MainWindow(QMainWindow):
             active = lineage.sessions[-1]
             parts.append("<b>Active training sources:</b><br>"
                          + "<br>".join(f"• {esc(f)}" for f in active.get("train_folders", [])))
-            parts.append("<b>Active test sources:</b><br>"
-                         + ("<br>".join(f"• {esc(f)}" for f in active.get("test_folders", []))
+            parts.append("<b>Active validation sources:</b><br>"
+                         + ("<br>".join(f"• {esc(f)}" for f in session_val_folders(active))
                             or "(held-out split of training pool)"))
         if len(lineage.sessions) > 1:
             parts.append("<b>Historical training sources:</b><br>"
@@ -879,16 +907,79 @@ class MainWindow(QMainWindow):
                                     "No model available yet. Train a model or select a saved one.")
             return
         self._collect_form(self.project)
-        folders = self.project.checked_test_folders() or self.project.checked_train_folders()
+        source, folders = self.review_folders()
         if not folders:
-            QMessageBox.information(self, "Manual Review", "Check a test (or training) folder first.")
+            QMessageBox.information(self, "Manual Review",
+                                    "Check a test, validation or training folder first.")
             return
         try:
             session = ReviewSession(checkpoint, folders, self.project.seed)
         except Exception as e:
             QMessageBox.warning(self, "Manual Review", f"Cannot start review:\n{e}")
             return
-        ReviewDialog(session, checkpoint, self).exec()
+        ReviewDialog(session, checkpoint, self, source).exec()
+
+    def review_folders(self) -> tuple[str, list[str]]:
+        """Images for Manual Review: validation sets while paused, test sets after training."""
+        p = self.project
+        if self.is_training():
+            candidates = [("validation sets", p.checked_val_folders()),
+                          ("training pools", p.checked_train_folders())]
+        else:
+            candidates = [("test sets (final exam)", p.checked_test_folders()),
+                          ("validation sets", p.checked_val_folders()),
+                          ("training pools", p.checked_train_folders())]
+        for source, folders in candidates:
+            if folders:
+                return source, folders
+        return "", []
+
+    def run_final_exam(self):
+        """Evaluate the selected model on the test sets (never used during training)."""
+        if self.project is None or self.is_training():
+            return
+        checkpoint = self.selected_checkpoint() or self.last_checkpoint
+        if not checkpoint:
+            QMessageBox.information(self, "Final exam",
+                                    "No model available yet. Train a model or select a saved one.")
+            return
+        self._collect_form(self.project)
+        folders = self.project.checked_test_folders()
+        if not folders:
+            QMessageBox.information(self, "Final exam", "Check at least one test folder first.")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = evaluate_checkpoint(checkpoint, folders, self.project.training.batch_size,
+                                         self.project.training.num_workers)
+        except Exception as e:
+            QMessageBox.warning(self, "Final exam", f"Cannot evaluate the test sets:\n{e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.cm_canvas.plot_confusion(result["confusion"], result["classes"], prefix="Test – ")
+        self.cm_norm_canvas.plot_confusion(result["confusion"], result["classes"], normalized=True,
+                                           prefix="Test – ")
+        self.conf_canvas.plot_confidence_curves(result["curves"])
+        summary = (f"Test samples: {result['samples']}\n"
+                   f"Accuracy: {result['accuracy'] * 100:.1f}%\n"
+                   f"Loss: {result['loss']:.4f}\n"
+                   f"Mean confidence: {result['mean_confidence'] * 100:.1f}%\n"
+                   f"Precision: {result['precision'] * 100:.1f}%  Recall: {result['recall'] * 100:.1f}%")
+        if result["skipped_classes"]:
+            summary += "\n\nSkipped classes unknown to the model: " + ", ".join(result["skipped_classes"])
+        if result["seen_in_training"]:
+            summary += ("\n\nWarning: these test folders were used during training/validation, so "
+                        "this is not an independent exam:\n" + "\n".join(result["seen_in_training"]))
+        self.log("=== Final exam on test sets ===\n" + summary)
+        self.project.evaluations.append({
+            "type": "test",
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+            **{k: result[k] for k in ("checkpoint", "test_folders", "samples", "loss", "accuracy",
+                                      "mean_confidence", "precision", "recall", "seen_in_training")},
+        })
+        self.manager.save(self.project)
+        QMessageBox.information(self, "Final exam", summary)
 
     # ------------------------------------------------------------------ misc
     def _reset_analytics(self, keep_counts: bool = False):

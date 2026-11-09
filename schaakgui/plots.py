@@ -26,8 +26,8 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.ax.set_axis_off()
         self.draw_idle()
 
-    def plot_confusion(self, cm, classes: list[str], normalized: bool = False):
-        title = "Normalized Confusion Matrix" if normalized else "Confusion Matrix"
+    def plot_confusion(self, cm, classes: list[str], normalized: bool = False, prefix: str = ""):
+        title = prefix + ("Normalized Confusion Matrix" if normalized else "Confusion Matrix")
         self._reset(title)
         cm = np.asarray(cm)
         data = normalize_confusion(cm) if normalized else cm
@@ -48,23 +48,23 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.draw_idle()
 
     def plot_counts(self, counts: dict[str, int], title: str = "Instance Count",
-                    test_counts: dict[str, int] | None = None):
-        """Bar chart of images per class (optionally side by side with test counts)."""
-        if not counts and not test_counts:
+                    others: dict[str, dict[str, int]] | None = None):
+        """Bar chart of samples per class (optionally side by side with e.g. validation/test counts)."""
+        series = {"train": counts, **{k: v for k, v in (others or {}).items() if v}}
+        if not any(series.values()):
             self.show_message(title, "No images in the selected folders")
             return
         self._reset(title)
-        names = sorted(set(counts) | set(test_counts or {}))
+        names = sorted(set().union(*series.values()))
         x = np.arange(len(names))
-        width = 0.4 if test_counts else 0.8
-        offset = width / 2 if test_counts else 0
-        bars = self.ax.bar(x - offset, [counts.get(n, 0) for n in names], width,
-                           color="tab:blue", label="train")
-        self.ax.bar_label(bars, fontsize=6)
-        if test_counts:
-            bars = self.ax.bar(x + offset, [test_counts.get(n, 0) for n in names], width,
-                               color="tab:orange", label="test")
+        width = 0.8 / len(series)
+        colors = ["tab:blue", "tab:green", "tab:orange", "tab:red"]
+        for i, (label, values) in enumerate(series.items()):
+            offset = (i - (len(series) - 1) / 2) * width
+            bars = self.ax.bar(x + offset, [values.get(n, 0) for n in names], width,
+                               color=colors[i % len(colors)], label=label)
             self.ax.bar_label(bars, fontsize=6)
+        if len(series) > 1:
             self.ax.legend()
         self.ax.set_xticks(x, names, rotation=90, fontsize=7)
         self.ax.set_ylabel("instances")

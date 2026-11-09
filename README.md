@@ -109,28 +109,40 @@ my_pieces/white-king/001.jpg
 my_pieces/black-pawn/xyz.png
 ```
 
+YOLO splits (the detector dataset from section 2) can be added directly, e.g. `datasets/chess/train`
+(or its `images` folder). Every box in `labels/*.txt` is cropped from its image and becomes one sample
+labeled with its class name from the `names` of `data.yaml` (looked up in the split folder and its two
+parent folders; unknown ids become `class_<id>`). Add each split separately, not the dataset root.
+
 Features:
 
 * **Projects** – create, switch, save and delete projects (top bar). Each project is a JSON file in
   `.projects/` and keeps its datasets, augmentations, quotas, checkpoints (`.projects/<name>/checkpoints/run_*`)
   and evaluation records.
-* **Datasets** – add multiple training pools and test/validation folders and check the ones to use.
+* **Datasets** – add multiple training pools, validation sets and test sets and check the ones to use.
+  * *Validation sets* are evaluated after every epoch (metrics, quotas, best model, early stopping).
+    Without validation folders, 20% of the training pool is held out for validation.
+  * *Test sets* are never used during training. They are the final exam after training: the
+    **🎓 Final exam (test sets)** button evaluates the selected model on them (accuracy, loss, confidence,
+    precision/recall, confusion matrix; recorded in the project's evaluations), and Manual Review shows
+    test images after training.
+
   Shuffle can be toggled and a fixed seed set. A bar chart shows the class balance of the checked pools.
-  Without test folders, 20% of the training pool is held out for validation.
 * **Augmentation** – checkboxes for horizontal/vertical flip, rotation, color jitter, affine/shear and
   random resized crop. They are composed into a `transforms.Compose` used only for the training split.
 * **Training & Quotas** – epochs, batch size, learning rate, image size, architecture; accuracy floor
   (per epoch) and moving-average target, confidence floor (mean top-1 confidence per epoch) and moving-average
   target. Training stops (optional) once all targets are met. Full weights are exported every *N* epochs
-  (`snapshots/epoch_XXXX.pt`) and early stopping halts training when validation loss/accuracy does not improve
-  for *patience* epochs.
+  (`snapshots/epoch_XXXX.pt`) and early stopping halts training when the monitored metric does not improve
+  for *patience* epochs. The monitor can be validation loss, validation accuracy, or *both* (stops once
+  neither loss nor accuracy improved for *patience* epochs).
 * **Checkpoints & Provenance** – resume training from any `.pt`/`.pth` checkpoint. Every checkpoint stores
   the cumulative epochs, quota milestones (e.g. "Achieved 82.0% Val Acc Floor (target 80%) at Epoch 15"),
   the folders used in each session, snapshots and the best weights. Selecting a model shows this in the
   *Model Provenance* card with achieved/pending milestone cards.
 * **Live training** – training runs in a `QThread`; batch and run progress bars, a live log and
   Pause/Resume/Stop buttons.
-* **Manual Review** – while paused or after training, shows random validation images with ground truth vs.
+* **Manual Review** – while paused (validation sets) or after training (test sets), shows random images with ground truth vs.
   top-3 predictions (green border = correct, red = incorrect) with Previous/Next buttons.
 * **Analytics** – confusion matrix, normalized confusion matrix, instance count, precision per epoch and
   precision/recall vs. confidence threshold, updated after every validation step.
