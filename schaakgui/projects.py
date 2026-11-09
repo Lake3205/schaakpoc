@@ -104,6 +104,10 @@ class Project:
     @classmethod
     def from_dict(cls, data: dict) -> "Project":
         data = dict(data)
+        if "val_folders" not in data:
+            # Before v2.1 the "test" folders were evaluated every epoch, i.e. they were validation sets.
+            data["val_folders"] = data.get("test_folders", [])
+            data["test_folders"] = []
         data["train_folders"] = [_from_dict(DatasetEntry, d) for d in data.get("train_folders", [])]
         data["val_folders"] = [_from_dict(DatasetEntry, d) for d in data.get("val_folders", [])]
         data["test_folders"] = [_from_dict(DatasetEntry, d) for d in data.get("test_folders", [])]

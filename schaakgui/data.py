@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 import yaml
-from PIL import Image
+from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
@@ -207,7 +207,11 @@ class MultiFolderImageDataset(Dataset):
     def load_image(self, index: int) -> Image.Image:
         """The (cropped) RGB image of a sample, without transform."""
         path, _, box = self.samples[index]
-        return crop_box(self.loader(path), box)
+        image = self.loader(path)
+        if box is not None:
+            # YOLO boxes refer to the EXIF-rotated image (as shown by viewers and labeling tools).
+            image = ImageOps.exif_transpose(image)
+        return crop_box(image, box)
 
     def __getitem__(self, index: int):
         image = self.load_image(index)

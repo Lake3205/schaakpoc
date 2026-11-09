@@ -40,3 +40,13 @@ def test_from_dict_ignores_unknown_keys():
     data["unknown"] = 1
     data["quota"]["unknown"] = 2
     assert Project.from_dict(data).name == "x"
+
+
+def test_pre_v21_test_folders_become_validation_folders():
+    data = Project(name="old").to_dict()
+    del data["val_folders"]
+    data["test_folders"] = [{"path": "/data/val", "checked": True}]
+    project = Project.from_dict(data)
+    assert project.checked_val_folders() == ["/data/val"] and project.test_folders == []
+    roundtrip = Project.from_dict(project.to_dict())
+    assert roundtrip.checked_val_folders() == ["/data/val"] and roundtrip.test_folders == []
