@@ -52,7 +52,7 @@ class QuotaConfig:
     snapshot_every: int = 10
     early_stopping: bool = True
     patience: int = 5
-    monitor: str = "val_loss"  # "val_loss" or "val_acc"
+    monitor: str = "val_loss"  # "val_loss", "val_acc" or "both"
 
 
 @dataclass
@@ -76,7 +76,8 @@ class DatasetEntry:
 class Project:
     name: str
     train_folders: list[DatasetEntry] = field(default_factory=list)
-    test_folders: list[DatasetEntry] = field(default_factory=list)
+    val_folders: list[DatasetEntry] = field(default_factory=list)  # evaluated every epoch
+    test_folders: list[DatasetEntry] = field(default_factory=list)  # final exam after training
     shuffle: bool = True
     seed: Optional[int] = None
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
@@ -91,6 +92,9 @@ class Project:
     def checked_train_folders(self) -> list[str]:
         return [d.path for d in self.train_folders if d.checked]
 
+    def checked_val_folders(self) -> list[str]:
+        return [d.path for d in self.val_folders if d.checked]
+
     def checked_test_folders(self) -> list[str]:
         return [d.path for d in self.test_folders if d.checked]
 
@@ -100,7 +104,12 @@ class Project:
     @classmethod
     def from_dict(cls, data: dict) -> "Project":
         data = dict(data)
+        if "val_folders" not in data:
+            # Before v2.1 the "test" folders were evaluated every epoch, i.e. they were validation sets.
+            data["val_folders"] = data.get("test_folders", [])
+            data["test_folders"] = []
         data["train_folders"] = [_from_dict(DatasetEntry, d) for d in data.get("train_folders", [])]
+        data["val_folders"] = [_from_dict(DatasetEntry, d) for d in data.get("val_folders", [])]
         data["test_folders"] = [_from_dict(DatasetEntry, d) for d in data.get("test_folders", [])]
         data["augmentation"] = _from_dict(AugmentationConfig, data.get("augmentation"))
         data["quota"] = _from_dict(QuotaConfig, data.get("quota"))

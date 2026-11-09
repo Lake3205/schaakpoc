@@ -96,6 +96,13 @@ class QuotaTracker:
                          for k, v in self.current.items())
 
 
+MONITORS = {
+    "val_loss": "validation loss",
+    "val_acc": "validation accuracy",
+    "both": "validation loss and accuracy",
+}
+
+
 class EarlyStopping:
     """Stop when the monitored metric fails to improve for ``patience`` epochs."""
 
@@ -121,3 +128,29 @@ class EarlyStopping:
         else:
             self.counter += 1
         return self.counter >= self.patience
+
+
+class EarlyStoppingMonitor:
+    """Early stopping on validation loss, validation accuracy or both.
+
+    With ``monitor="both"`` training stops once *neither* the loss nor the accuracy improved
+    for ``patience`` epochs (an improvement of either metric keeps training going).
+    """
+
+    def __init__(self, patience: int = 5, monitor: str = "val_loss", min_delta: float = 0.0):
+        if monitor not in MONITORS:
+            raise ValueError(f"monitor must be one of {', '.join(MONITORS)}")
+        self.monitor = monitor
+        keys = ("val_loss", "val_acc") if monitor == "both" else (monitor,)
+        self.stoppers = {k: EarlyStopping(patience, "max" if k == "val_acc" else "min", min_delta)
+                         for k in keys}
+        self.patience = max(1, int(patience))
+
+    def step(self, val_loss: float, val_acc: float) -> bool:
+        """Register an epoch's validation loss/accuracy; returns True when training should stop."""
+        values = {"val_loss": val_loss, "val_acc": val_acc}
+        results = [stopper.step(values[k]) for k, stopper in self.stoppers.items()]
+        return all(results)
+
+    def describe(self) -> str:
+        return MONITORS[self.monitor]

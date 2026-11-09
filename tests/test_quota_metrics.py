@@ -9,7 +9,7 @@ from schaakgui.metrics import (
     precision_recall,
 )
 from schaakgui.projects import QuotaConfig
-from schaakgui.quota import EarlyStopping, QuotaTracker
+from schaakgui.quota import EarlyStopping, EarlyStoppingMonitor, QuotaTracker
 
 
 def test_quota_milestones_and_all_met():
@@ -46,6 +46,28 @@ def test_early_stopping():
     assert maximize.step(0.5)
     with pytest.raises(ValueError):
         EarlyStopping(mode="up")
+
+
+def test_early_stopping_monitor_loss_accuracy_and_both():
+    loss = EarlyStoppingMonitor(patience=2, monitor="val_loss")
+    assert not loss.step(1.0, 0.5)
+    assert not loss.step(1.1, 0.9)
+    assert loss.step(1.2, 0.95)  # accuracy improves, but only loss is monitored
+
+    acc = EarlyStoppingMonitor(patience=2, monitor="val_acc")
+    assert not acc.step(1.0, 0.5)
+    assert not acc.step(0.5, 0.5)
+    assert acc.step(0.1, 0.4)  # loss improves, but only accuracy is monitored
+
+    both = EarlyStoppingMonitor(patience=2, monitor="both")
+    assert not both.step(1.0, 0.5)
+    assert not both.step(1.1, 0.6)  # accuracy improved
+    assert not both.step(0.9, 0.6)  # loss improved
+    assert not both.step(0.95, 0.55)  # loss stalled 1, accuracy stalled 2
+    assert both.step(0.95, 0.55)  # both stalled for 2 epochs
+    assert both.describe() == "validation loss and accuracy"
+    with pytest.raises(ValueError):
+        EarlyStoppingMonitor(monitor="train_loss")
 
 
 def test_confusion_and_precision_recall():

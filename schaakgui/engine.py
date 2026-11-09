@@ -23,7 +23,7 @@ from .data import (
 )
 from .metrics import confidence_curves, confusion_matrix, macro_precision_recall
 from .projects import AugmentationConfig, QuotaConfig, TrainingConfig
-from .quota import EarlyStopping, QuotaTracker
+from .quota import EarlyStoppingMonitor, QuotaTracker
 
 VAL_SPLIT = 0.2
 
@@ -34,8 +34,11 @@ class TrainingStopped(Exception):
 
 @dataclass
 class TrainJob:
+    """A training session. ``val_folders`` are evaluated every epoch; test folders are never
+    used during training (see :func:`evaluate_checkpoint` for the final exam)."""
+
     train_folders: list[str]
-    test_folders: list[str]
+    val_folders: list[str]
     output_dir: str
     shuffle: bool = True
     seed: Optional[int] = None
@@ -81,6 +84,46 @@ def evaluate(model: nn.Module, loader: DataLoader, device, num_classes: int,
         "y_pred": y_pred,
         "confidences": conf,
         "confusion": confusion_matrix(y_true, y_pred, num_classes),
+    }
+
+
+def _same_folders(a: list[str], b: list[str]) -> set[str]:
+    """Folders of ``b`` that are also in ``a`` (compared by resolved path)."""
+    resolved = {str(Path(f).resolve()) for f in a}
+    return {f for f in b if str(Path(f).resolve()) in resolved}
+
+
+def evaluate_checkpoint(checkpoint_path: str, folders: list[str], batch_size: int = 32,
+                        num_workers: int = 0) -> dict:
+    """Final exam: evaluate a saved model on test folders that were not used during training."""
+    if not folders:
+        raise ValueError("Select at least one test folder.")
+    ckpt = load_checkpoint(checkpoint_path)
+    classes = list(ckpt["classes"])
+    dataset = MultiFolderImageDataset(folders, classes, build_eval_transform(int(ckpt["image_size"])))
+    if len(dataset) == 0:
+        raise ValueError("The selected test folders contain no images of the model's classes.")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model_from_checkpoint(ckpt).to(device)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    ev = evaluate(model, loader, device, len(classes))
+    precision, recall = macro_precision_recall(ev["confusion"])
+    sources = Lineage.from_dict(ckpt.get("lineage")).dataset_sources()
+    return {
+        "checkpoint": str(checkpoint_path),
+        "test_folders": list(folders),
+        "classes": classes,
+        "samples": len(dataset),
+        "loss": ev["loss"],
+        "accuracy": ev["accuracy"],
+        "mean_confidence": ev["mean_confidence"],
+        "precision": precision,
+        "recall": recall,
+        "confusion": ev["confusion"].tolist(),
+        "curves": confidence_curves(ev["confidences"],
+                                    np.asarray(ev["y_true"]) == np.asarray(ev["y_pred"])),
+        "skipped_classes": sorted(dataset.skipped_classes),
+        "seen_in_training": sorted(_same_folders(sources["train"] + sources["val"], folders)),
     }
 
 
@@ -155,16 +198,20 @@ class Trainer:
         train_tf = build_train_transform(job.augmentation, image_size)
         eval_tf = build_eval_transform(image_size)
         log("Augmentations: " + (", ".join(enabled_augmentations(job.augmentation)) or "none"))
-        if job.test_folders:
+        if job.val_folders:
+            overlap = sorted(_same_folders(job.train_folders, job.val_folders))
+            if overlap:
+                log("Warning: folder(s) used for both training and validation: " + ", ".join(overlap))
             train_ds = MultiFolderImageDataset(job.train_folders, classes, train_tf)
-            val_ds = MultiFolderImageDataset(job.test_folders, classes, eval_tf)
+            val_ds = MultiFolderImageDataset(job.val_folders, classes, eval_tf)
             if val_ds.skipped_classes:
-                log("Warning: skipping test classes unknown to the model: "
+                log("Warning: skipping validation classes unknown to the model: "
                     + ", ".join(sorted(val_ds.skipped_classes)))
         else:
             full = MultiFolderImageDataset(job.train_folders, classes)
             train_ds, val_ds = full.split(VAL_SPLIT, job.seed, train_tf, eval_tf)
-            log(f"No test folders selected: holding out {VAL_SPLIT:.0%} of the training pool for validation.")
+            log(f"No validation folders selected: holding out {VAL_SPLIT:.0%} of the training pool "
+                f"for validation.")
         if len(train_ds) < 2 or len(val_ds) == 0:
             raise ValueError("Training (at least 2 images) and validation sets must contain images.")
         log(f"Training samples: {len(train_ds)}, validation samples: {len(val_ds)}, "
@@ -206,8 +253,7 @@ class Trainer:
         quota = QuotaTracker(job.quota, lineage.quota_history)
         stopper = None
         if job.quota.early_stopping:
-            mode = "max" if job.quota.monitor == "val_acc" else "min"
-            stopper = EarlyStopping(job.quota.patience, mode)
+            stopper = EarlyStoppingMonitor(job.quota.patience, job.quota.monitor)
 
         start_epoch = lineage.total_epochs_completed
         session = {
@@ -215,7 +261,7 @@ class Trainer:
             "start_epoch": start_epoch,
             "end_epoch": start_epoch,
             "train_folders": list(job.train_folders),
-            "test_folders": list(job.test_folders),
+            "val_folders": list(job.val_folders),
             "augmentations": enabled_augmentations(job.augmentation),
             "resumed_from": job.resume_checkpoint,
             "output_dir": str(out.resolve()),
@@ -297,13 +343,11 @@ class Trainer:
                 stop_reason = "quota"
                 log("All quota targets satisfied - stopping training.")
                 break
-            if stopper is not None:
-                value = ev["accuracy"] if stopper.mode == "max" else ev["loss"]
-                if stopper.step(value):
-                    stop_reason = "early_stopping"
-                    log(f"Early stopping: {job.quota.monitor} did not improve for "
-                        f"{stopper.patience} epochs.")
-                    break
+            if stopper is not None and stopper.step(ev["loss"], ev["accuracy"]):
+                stop_reason = "early_stopping"
+                log(f"Early stopping: {stopper.describe()} did not improve for "
+                    f"{stopper.patience} epochs.")
+                break
 
         session["stop_reason"] = stop_reason
         session["ended_at"] = datetime.now().isoformat(timespec="seconds")

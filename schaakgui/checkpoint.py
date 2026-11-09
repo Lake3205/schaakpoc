@@ -25,6 +25,11 @@ def build_model(architecture: str, num_classes: int, pretrained: bool = False) -
     return model
 
 
+def session_val_folders(session: dict) -> list[str]:
+    """Validation folders of a session (older checkpoints stored them as ``test_folders``)."""
+    return list(session.get("val_folders", session.get("test_folders", [])))
+
+
 @dataclass
 class Lineage:
     """Provenance stored inside every checkpoint."""
@@ -37,12 +42,12 @@ class Lineage:
     history: list[dict] = field(default_factory=list)
 
     def dataset_sources(self) -> dict[str, list[str]]:
-        """Unique train/test folders used over all sessions (in first-use order)."""
-        train, test = [], []
+        """Unique train/validation folders used over all sessions (in first-use order)."""
+        train, val = [], []
         for s in self.sessions:
             train += [f for f in s.get("train_folders", []) if f not in train]
-            test += [f for f in s.get("test_folders", []) if f not in test]
-        return {"train": train, "test": test}
+            val += [f for f in session_val_folders(s) if f not in val]
+        return {"train": train, "val": val}
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -1,12 +1,12 @@
-"""Modal dialog for manually reviewing predictions on random validation images."""
+"""Modal dialog for manually reviewing predictions on random validation/test images."""
 from __future__ import annotations
 
 import html
+import io
 import random
 from typing import Optional
 
 import torch
-from PIL import Image
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
@@ -22,7 +22,7 @@ from .data import MultiFolderImageDataset, build_eval_transform
 
 
 class ReviewSession:
-    """Model + validation samples + random sample history (Qt independent)."""
+    """Model + validation/test samples + random sample history (Qt independent)."""
 
     def __init__(self, checkpoint_path: str, folders: list[str], seed: Optional[int] = None):
         ckpt = load_checkpoint(checkpoint_path)
@@ -31,20 +31,20 @@ class ReviewSession:
         self.transform = build_eval_transform(int(ckpt["image_size"]))
         self.dataset = MultiFolderImageDataset(folders, self.classes)
         if len(self.dataset) == 0:
-            raise ValueError("The selected validation folders contain no images of the model's classes.")
+            raise ValueError("The selected folders contain no images of the model's classes.")
         self.rng = random.Random(seed)
         self.history: list[int] = []
         self.position = -1
 
     @torch.no_grad()
     def predict(self, index: int) -> dict:
-        path, target = self.dataset.samples[index]
-        image = Image.open(path).convert("RGB")
+        path, target, box = self.dataset.samples[index]
+        image = self.dataset.load_image(index)
         probs = torch.softmax(self.model(self.transform(image).unsqueeze(0)), dim=1)[0]
         k = min(3, len(self.classes))
         conf, idx = probs.topk(k)
         top = [(self.classes[i], float(c)) for c, i in zip(conf.tolist(), idx.tolist())]
-        return {"path": path, "truth": self.classes[target], "top3": top,
+        return {"path": path, "box": box, "image": image, "truth": self.classes[target], "top3": top,
                 "correct": top[0][0] == self.classes[target]}
 
     def next(self) -> dict:
@@ -63,14 +63,14 @@ class ReviewSession:
 
 
 class ReviewDialog(QDialog):
-    def __init__(self, session: ReviewSession, checkpoint_path: str, parent=None):
+    def __init__(self, session: ReviewSession, checkpoint_path: str, parent=None, source: str = ""):
         super().__init__(parent)
         self.session = session
         self.setWindowTitle("Manual Review")
         self.setModal(True)
         self.resize(560, 640)
 
-        self.info = QLabel(f"Model: {checkpoint_path}")
+        self.info = QLabel(f"Model: {checkpoint_path}" + (f"\nImages: {source}" if source else ""))
         self.info.setWordWrap(True)
         self.image = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self.image.setMinimumSize(420, 420)
@@ -109,7 +109,10 @@ class ReviewDialog(QDialog):
 
     def _show(self, result: dict):
         color = "#2e7d32" if result["correct"] else "#c62828"
-        pixmap = QPixmap(result["path"])
+        buffer = io.BytesIO()
+        result["image"].save(buffer, format="PNG")
+        pixmap = QPixmap()
+        pixmap.loadFromData(buffer.getvalue(), "PNG")
         if not pixmap.isNull():
             pixmap = pixmap.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio,
                                    Qt.TransformationMode.SmoothTransformation)
@@ -117,8 +120,11 @@ class ReviewDialog(QDialog):
         self.image.setStyleSheet(f"border: 6px solid {color};")
         self.badge.setText("CORRECT" if result["correct"] else "INCORRECT")
         self.badge.setStyleSheet(f"background: {color}; color: white; font-weight: bold; padding: 4px;")
+        box = ""
+        if result["box"] is not None:
+            box = " – label box (x1, y1, x2, y2) = " + ", ".join(f"{v:.3f}" for v in result["box"])
         self.truth.setText(f"<b>Ground truth:</b> {html.escape(result['truth'])}"
-                           f"<br><small>{html.escape(result['path'])}</small>")
+                           f"<br><small>{html.escape(result['path'])}{box}</small>")
         lines = []
         for rank, (name, conf) in enumerate(result["top3"], 1):
             style = "color:#2e7d32;font-weight:bold" if name == result["truth"] else ""

@@ -1,4 +1,12 @@
-"""Multi-folder image datasets (``class_name/xxx.jpg``) and augmentation pipelines."""
+"""Multi-folder image datasets and augmentation pipelines.
+
+Two folder layouts are supported:
+
+* ImageFolder: ``class_name/xxx.jpg`` - the sub-folder name is the label.
+* YOLO: ``images/xxx.jpg`` + ``labels/xxx.txt`` (e.g. ``datasets/chess/train``). Every labeled box is
+  cropped from its image and becomes one sample; class names come from the ``names`` of a
+  ``data.yaml`` in the folder or one of its two parent folders.
+"""
 from __future__ import annotations
 
 import random
@@ -6,6 +14,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+import yaml
+from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
@@ -15,21 +25,115 @@ from .projects import AugmentationConfig
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
+# Normalized (x1, y1, x2, y2) crop box of a YOLO label, ``None`` for the whole image.
+Box = Optional[tuple[float, float, float, float]]
+
 
 def is_image(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in IMG_EXTENSIONS
 
 
-def scan_folder(root: str | Path) -> dict[str, list[str]]:
-    """Return ``{class_name: [image paths]}`` for an ImageFolder-style directory."""
+def yolo_dirs(root: str | Path) -> Optional[tuple[Path, Path]]:
+    """``(images_dir, labels_dir)`` if ``root`` is a YOLO split folder (or its ``images`` folder)."""
+    root = Path(root)
+    if (root / "images").is_dir() and (root / "labels").is_dir():
+        return root / "images", root / "labels"
+    if root.name == "images" and (root.parent / "labels").is_dir():
+        return root, root.parent / "labels"
+    return None
+
+
+def _yaml_names(path: Path) -> dict[int, str]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return {}
+    names = data.get("names") if isinstance(data, dict) else None
+    if isinstance(names, list):
+        return {i: str(n) for i, n in enumerate(names)}
+    if isinstance(names, dict):
+        try:
+            return {int(k): str(v) for k, v in names.items()}
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
+def yolo_class_names(split_dir: str | Path) -> dict[int, str]:
+    """Class id -> name from the first ``*.yaml`` with ``names`` in the split folder or its parents."""
+    split_dir = Path(split_dir).resolve()
+    for directory in [split_dir, *list(split_dir.parents)[:2]]:
+        candidates = [directory / "data.yaml"] + sorted(directory.glob("*.yaml")) \
+            + sorted(directory.glob("*.yml"))
+        for path in candidates:
+            if path.is_file():
+                names = _yaml_names(path)
+                if names:
+                    return names
+    return {}
+
+
+def read_yolo_labels(label_file: str | Path) -> list[tuple[int, tuple[float, float, float, float]]]:
+    """``[(class_id, (x1, y1, x2, y2))]`` with normalized corners from a YOLO label file.
+
+    Supports box lines (``cls xc yc w h``) and segmentation lines (``cls x1 y1 x2 y2 ...``).
+    """
+    result = []
+    try:
+        text = Path(label_file).read_text(encoding="utf-8")
+    except OSError:
+        return result
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            cls = int(float(parts[0]))
+            values = [float(v) for v in parts[1:]]
+        except ValueError:
+            continue
+        if len(values) == 4:
+            xc, yc, w, h = values
+            x1, y1, x2, y2 = xc - w / 2, yc - h / 2, xc + w / 2, yc + h / 2
+        else:
+            xs, ys = values[0::2], values[1::2]
+            n = min(len(xs), len(ys))
+            x1, x2, y1, y2 = min(xs[:n]), max(xs[:n]), min(ys[:n]), max(ys[:n])
+        x1, y1, x2, y2 = (min(1.0, max(0.0, v)) for v in (x1, y1, x2, y2))
+        if x2 > x1 and y2 > y1:
+            result.append((cls, (x1, y1, x2, y2)))
+    return result
+
+
+def scan_yolo_folder(images_dir: Path, labels_dir: Path) -> dict[str, list[tuple[str, Box]]]:
+    """``{class_name: [(image path, box)]}`` for every labeled box of a YOLO split."""
+    names = yolo_class_names(images_dir.parent)
+    result: dict[str, list[tuple[str, Box]]] = {}
+    for image in sorted(p for p in images_dir.rglob("*") if is_image(p)):
+        label_file = (labels_dir / image.relative_to(images_dir)).with_suffix(".txt")
+        for cls, box in read_yolo_labels(label_file):
+            result.setdefault(names.get(cls, f"class_{cls}"), []).append((str(image), box))
+    return dict(sorted(result.items()))
+
+
+def scan_folder(root: str | Path) -> dict[str, list[tuple[str, Box]]]:
+    """Return ``{class_name: [(image path, box)]}`` for an ImageFolder or YOLO directory."""
     root = Path(root)
     if not root.is_dir():
         raise FileNotFoundError(f"Dataset folder not found: {root}")
+    yolo = yolo_dirs(root)
+    if yolo is not None:
+        return scan_yolo_folder(*yolo)
+    splits = [p.name for p in sorted(root.iterdir()) if p.is_dir() and yolo_dirs(p) is not None]
+    if splits:
+        raise ValueError(f"{root} is the root of a YOLO dataset; add its split folders "
+                         f"({', '.join(splits)}) separately instead.")
     result = {}
     for class_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         images = sorted(str(p) for p in class_dir.rglob("*") if is_image(p))
         if images:
-            result[class_dir.name] = images
+            result[class_dir.name] = [(p, None) for p in images]
     return result
 
 
@@ -42,7 +146,7 @@ def discover_classes(folders: Sequence[str | Path]) -> list[str]:
 
 
 def class_counts(folders: Sequence[str | Path]) -> dict[str, int]:
-    """Aggregate number of images per class across folders (sorted by class name)."""
+    """Aggregate number of samples per class across folders (sorted by class name)."""
     counts: Counter = Counter()
     for folder in folders:
         for name, images in scan_folder(folder).items():
@@ -50,11 +154,22 @@ def class_counts(folders: Sequence[str | Path]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def crop_box(image: Image.Image, box: Box) -> Image.Image:
+    """Crop a normalized ``(x1, y1, x2, y2)`` box (at least 1 pixel) from an image."""
+    if box is None:
+        return image
+    w, h = image.size
+    x1, y1 = int(box[0] * w), int(box[1] * h)
+    x2, y2 = max(x1 + 1, round(box[2] * w)), max(y1 + 1, round(box[3] * h))
+    return image.crop((x1, y1, min(w, x2), min(h, y2)))
+
+
 class MultiFolderImageDataset(Dataset):
     """Combines several ImageFolder-style roots into one dataset with a shared class index.
 
     Images whose class is not in ``classes`` are skipped (their class names are
-    collected in ``skipped_classes``).
+    collected in ``skipped_classes``). Samples are ``(path, class index, box)`` tuples;
+    ``box`` is ``None`` for ImageFolder images and the crop box of a YOLO label otherwise.
     """
 
     def __init__(
@@ -62,7 +177,7 @@ class MultiFolderImageDataset(Dataset):
         folders: Sequence[str | Path],
         classes: Optional[Sequence[str]] = None,
         transform: Optional[Callable] = None,
-        samples: Optional[list[tuple[str, int]]] = None,
+        samples: Optional[list[tuple[str, int, Box]]] = None,
     ):
         self.folders = [str(f) for f in folders]
         self.classes = list(classes) if classes is not None else discover_classes(folders)
@@ -80,18 +195,27 @@ class MultiFolderImageDataset(Dataset):
                         self.skipped_classes.add(name)
                         continue
                     idx = self.class_to_idx[name]
-                    self.samples.extend((p, idx) for p in images)
+                    self.samples.extend((p, idx, box) for p, box in images)
 
     @property
     def targets(self) -> list[int]:
-        return [t for _, t in self.samples]
+        return [s[1] for s in self.samples]
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, index: int):
-        path, target = self.samples[index]
+    def load_image(self, index: int) -> Image.Image:
+        """The (cropped) RGB image of a sample, without transform."""
+        path, _, box = self.samples[index]
         image = self.loader(path)
+        if box is not None:
+            # YOLO boxes refer to the EXIF-rotated image (as shown by viewers and labeling tools).
+            image = ImageOps.exif_transpose(image)
+        return crop_box(image, box)
+
+    def __getitem__(self, index: int):
+        image = self.load_image(index)
+        target = self.samples[index][1]
         if self.transform is not None:
             image = self.transform(image)
         return image, target
@@ -103,7 +227,7 @@ class MultiFolderImageDataset(Dataset):
         )
 
     def split(self, val_fraction: float, seed: Optional[int], train_transform, val_transform):
-        """Random train/validation split (used when no test folders are selected)."""
+        """Random train/validation split (used when no validation folders are selected)."""
         indices = list(range(len(self.samples)))
         random.Random(seed).shuffle(indices)
         n_val = max(1, int(round(len(indices) * val_fraction))) if len(indices) > 1 else 0
