@@ -9,6 +9,7 @@ and **YOLO** (Ultralytics) for detection, running on an NVIDIA RTX 5070 GPU.
 | --- | --- |
 | `train.py` | Train a chess-piece detector on your GPU |
 | `detect.py` | Detect pieces from a webcam, image or video |
+| `detect_test.py` | Evaluate the trained model on the labeled test set |
 | `chess.yaml` | Dataset config (12 classes: white/black king, queen, rook, bishop, knight, pawn) |
 
 ## 1. Setup (Windows or Linux, Python 3.10+)
@@ -46,9 +47,16 @@ If your dataset uses different class names/order, update `names` in `chess.yaml`
 ## 3. Train
 
 ```bash
-python train.py              # defaults: 50 epochs, 640px, batch 16
+python train.py              # defaults: 50 epochs, 640px, batch 16, workers 0
 python train.py --epochs 100 --batch 32
 ```
+
+`workers=0` avoids Windows multiprocessing memory errors. You can increase it
+with `--workers 2` if your system has enough memory.
+
+After every epoch a summary line is printed with precision (P), recall (R),
+mAP50 and mAP50-95 on the validation set. All per-epoch metrics are also saved
+to `runs/chess/results.csv`.
 
 The trained model is saved to `runs/chess/weights/best.pt`.
 
@@ -62,3 +70,22 @@ python detect.py --conf 0.3               # lower confidence threshold
 ```
 
 Detected pieces are drawn on the image and printed in the terminal.
+
+## 5. Test
+
+Put a labeled test set in `datasets/chess/test/images` and `datasets/chess/test/labels`, then:
+
+```bash
+python detect_test.py
+```
+
+This prints precision, recall, mAP50 and mAP50-95 (overall and per class) and
+saves plots and the confusion matrix to `runs/chess_test`.
+
+To check the model yourself, open 10 random test images with boxes drawn
+(prediction on the left, ground-truth labels on the right; any key = next, q = quit):
+
+```bash
+python detect_test.py --show
+python detect_test.py --show --num 20 --show-conf 0.3 --seed 42
+```

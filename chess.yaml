@@ -2,9 +2,11 @@
 # Put your dataset in ./datasets/chess with this layout:
 #   datasets/chess/train/images  datasets/chess/train/labels
 #   datasets/chess/valid/images  datasets/chess/valid/labels
+#   datasets/chess/test/images   datasets/chess/test/labels   (optional, used by detect_test.py)
 path: datasets/chess
 train: train/images
 val: valid/images
+test: test/images
 
 names:
   0: black-bishop
