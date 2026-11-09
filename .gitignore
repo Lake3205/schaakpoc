@@ -5,3 +5,4 @@ venv/
 datasets/
 runs/
 *.pt
+.projects/

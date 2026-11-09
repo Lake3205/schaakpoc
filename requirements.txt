@@ -2,3 +2,10 @@
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 opencv-python
 ultralytics
+# schaakpoc v2 training GUI (app.py)
+torchvision
+PyQt6
+matplotlib
+numpy
+pillow
+pytest

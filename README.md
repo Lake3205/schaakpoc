@@ -11,6 +11,8 @@ and **YOLO** (Ultralytics) for detection, running on an NVIDIA RTX 5070 GPU.
 | `detect.py` | Detect pieces from a webcam, image or video |
 | `detect_test.py` | Evaluate the trained model on the labeled test set |
 | `chess.yaml` | Dataset config (12 classes: white/black king, queen, rook, bishop, knight, pawn) |
+| `app.py` | **v2** desktop GUI (PyQt6) to train chess-piece *image classifiers* (see section 6) |
+| `schaakgui/` | Code of the v2 GUI: projects, datasets, augmentations, quotas, checkpoints, training thread |
 
 ## 1. Setup (Windows or Linux, Python 3.10+)
 
@@ -88,4 +90,53 @@ To check the model yourself, open 10 random test images with boxes drawn
 ```bash
 python detect_test.py --show
 python detect_test.py --show --num 20 --show-conf 0.3 --seed 42
+```
+
+## 6. schaakpoc v2: training GUI for piece classifiers
+
+`app.py` opens a desktop window for training image classifiers (one cropped piece per image)
+with PyTorch/torchvision:
+
+```bash
+python app.py                      # workspace projects are stored in ./.projects
+python app.py --projects D:/work   # use another workspace directory
+```
+
+Dataset folders use the `ImageFolder` layout, one sub-folder per class:
+
+```
+my_pieces/white-king/001.jpg
+my_pieces/black-pawn/xyz.png
+```
+
+Features:
+
+* **Projects** – create, switch, save and delete projects (top bar). Each project is a JSON file in
+  `.projects/` and keeps its datasets, augmentations, quotas, checkpoints (`.projects/<name>/checkpoints/run_*`)
+  and evaluation records.
+* **Datasets** – add multiple training pools and test/validation folders and check the ones to use.
+  Shuffle can be toggled and a fixed seed set. A bar chart shows the class balance of the checked pools.
+  Without test folders, 20% of the training pool is held out for validation.
+* **Augmentation** – checkboxes for horizontal/vertical flip, rotation, color jitter, affine/shear and
+  random resized crop. They are composed into a `transforms.Compose` used only for the training split.
+* **Training & Quotas** – epochs, batch size, learning rate, image size, architecture; accuracy floor
+  (per epoch) and moving-average target, confidence floor (mean top-1 confidence per epoch) and moving-average
+  target. Training stops (optional) once all targets are met. Full weights are exported every *N* epochs
+  (`snapshots/epoch_XXXX.pt`) and early stopping halts training when validation loss/accuracy does not improve
+  for *patience* epochs.
+* **Checkpoints & Provenance** – resume training from any `.pt`/`.pth` checkpoint. Every checkpoint stores
+  the cumulative epochs, quota milestones (e.g. "Achieved 82.0% Val Acc Floor (target 80%) at Epoch 15"),
+  the folders used in each session, snapshots and the best weights. Selecting a model shows this in the
+  *Model Provenance* card with achieved/pending milestone cards.
+* **Live training** – training runs in a `QThread`; batch and run progress bars, a live log and
+  Pause/Resume/Stop buttons.
+* **Manual Review** – while paused or after training, shows random validation images with ground truth vs.
+  top-3 predictions (green border = correct, red = incorrect) with Previous/Next buttons.
+* **Analytics** – confusion matrix, normalized confusion matrix, instance count, precision per epoch and
+  precision/recall vs. confidence threshold, updated after every validation step.
+
+Run the tests with:
+
+```bash
+python -m pytest tests
 ```
