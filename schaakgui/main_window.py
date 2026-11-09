@@ -910,9 +910,13 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-            self.worker.request_stop()
-            self.thread.quit()
-            self.thread.wait()
+        # Training may have finished while the dialog was open, so re-check.
+        thread, worker = self.thread, self.worker
+        if worker is not None:
+            worker.request_stop()
+        if thread is not None:
+            thread.quit()
+            thread.wait()
         if self.project is not None:
             self.save_project()
         super().closeEvent(event)

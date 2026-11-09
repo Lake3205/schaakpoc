@@ -30,7 +30,7 @@ def test_duplicate_and_invalid_names(tmp_path):
     manager.create("p1")
     with pytest.raises(ValueError):
         manager.create("p1")
-    for bad in ("../evil", "", "a/b", ".hidden", "x."):
+    for bad in ("../evil", "", "a/b", ".hidden", "x.", "x.json"):
         with pytest.raises(ValueError):
             manager.create(bad)
 

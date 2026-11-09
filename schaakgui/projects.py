@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 PROJECTS_DIR = Path(".projects")
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$")
 
 
 def _now() -> str:
@@ -118,10 +118,10 @@ class ProjectManager:
     @staticmethod
     def validate_name(name: str) -> str:
         name = name.strip()
-        if not _NAME_RE.match(name) or name.endswith("."):
+        if not _NAME_RE.match(name):
             raise ValueError(
                 "Project names must start with a letter or digit and may only contain "
-                "letters, digits, spaces, '_', '-' and '.' (max 64 characters)."
+                "letters, digits, spaces, '_' and '-' (max 64 characters)."
             )
         return name
 
@@ -133,7 +133,7 @@ class ProjectManager:
         return self.root / self.validate_name(name)
 
     def list_projects(self) -> list[str]:
-        return sorted(p.stem for p in self.root.glob("*.json"))
+        return sorted(p.stem for p in self.root.glob("*.json") if p.is_file())
 
     def exists(self, name: str) -> bool:
         return self.json_path(name).exists()
