@@ -1,14 +1,34 @@
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import torch
+from PIL import Image
 
 pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+import schaakgui.detector as detector_module  # noqa: E402
+import schaakgui.review_dialog as review_dialog_module  # noqa: E402
 from schaakgui.main_window import MainWindow  # noqa: E402
 from schaakgui.projects import DatasetEntry, ProjectManager  # noqa: E402
-from schaakgui.review_dialog import ReviewDialog, ReviewSession  # noqa: E402
+from schaakgui.review_dialog import (  # noqa: E402
+    DetectionReviewDialog,
+    ImageTestDialog,
+    ReviewDialog,
+    ReviewSession,
+)
 from schaakgui.sync_dialog import YamlSyncDialog  # noqa: E402
+
+
+class FakeDetector:
+    """Stands in for an Ultralytics YOLO detector: two boxes, returned out of reading order."""
+
+    def __call__(self, image, conf, device, verbose):
+        boxes = SimpleNamespace(xyxy=torch.tensor([[24.0, 4.0, 46.0, 22.0], [2.0, 0.0, 22.0, 20.0]]),
+                                conf=torch.tensor([0.8, 0.9]), cls=torch.tensor([1.0, 0.0]))
+        return [SimpleNamespace(names={0: "White_Rook", 1: "black-king"}, boxes=boxes)]
 
 
 @pytest.fixture(scope="module")
@@ -29,7 +49,9 @@ def test_full_gui_workflow(app, datasets, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: messages.append(a[2]))
     manager = ProjectManager(tmp_path / ".projects")
     window = MainWindow(manager)
-    assert window.project.name == "default"
+    assert window.project.name == "default" and window.task == "detect"
+    window.task_combo.setCurrentIndex(window.task_combo.findData("classify"))
+    assert window.project.task == "classify" and manager.load("default").task == "classify"
 
     window.train_folders.set_entries([DatasetEntry(str(datasets["a"])),
                                       DatasetEntry(str(datasets["b"]), False)])
@@ -93,6 +115,60 @@ def test_full_gui_workflow(app, datasets, tmp_path, monkeypatch):
     assert session.position == 0 and not dialog.prev_button.isEnabled()
     dialog.close()
 
+    exec_calls = []
+    monkeypatch.setattr(ImageTestDialog, "exec", lambda d: exec_calls.append(d) or 0)
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+    window.open_picture_test()
+    picture_dialog = exec_calls[-1]
+    assert picture_dialog.detector_combo.count() == 0
+    assert "no detector yet" in picture_dialog.status.text()
+    assert picture_dialog.classifier_combo.currentData() == picture_dialog.tester.classifier_path
+    assert picture_dialog.tester.has_classifier
+    picture = tmp_path / "board.png"
+    Image.new("RGB", (48, 24), (245, 245, 245)).save(picture)
+    assert picture_dialog.test_picture(str(picture)) is None
+    assert "No YOLO detector loaded" in warnings[-1]
+
+    detectors_dir = manager.project_dir("default") / "checkpoints" / "detectors"
+    assert picture_dialog.import_picture_detector(window.selected_checkpoint()) is None
+    assert "classifier checkpoint" in warnings[-1] and not detectors_dir.exists()
+
+    monkeypatch.setattr(detector_module, "load_yolo_detector", lambda path: FakeDetector())
+    monkeypatch.setattr(review_dialog_module, "load_yolo_detector", lambda path: FakeDetector())
+    outside = tmp_path / "weights.pt"
+    outside.write_bytes(b"detector")
+    imported = picture_dialog.import_picture_detector(str(outside))
+    assert Path(imported).parent == detectors_dir.resolve()
+    assert picture_dialog.tester.detector_path == imported
+    assert picture_dialog.detector_combo.currentData() == imported
+    assert "Ready" in picture_dialog.status.text()
+    assert picture_dialog.import_picture_detector(imported) == imported  # no duplicate copy
+    assert window.project_detectors() == [imported] and picture_dialog.detector_combo.count() == 1
+    window.refresh_checkpoints()
+    assert window.checkpoint_list.count() == 4  # detectors are not classifier checkpoints
+
+    result = picture_dialog.test_picture(str(picture))
+    detections = result["detections"]
+    assert [d["detector"][0] for d in detections] == ["White_Rook", "black-king"]  # reading order
+    assert result["classified"] and picture_dialog.pieces.count() == 2
+    same_piece = {"White_Rook": "white-rook", "black-king": "black-king"}
+    for i, d in enumerate(detections):
+        assert len(d["top3"]) == 3 and d["label"] in picture_dialog.tester.classes
+        assert d["agree"] == (d["label"] == same_piece[d["detector"][0]])
+        assert ("(detector:" in picture_dialog.pieces.item(i).text()) == (not d["agree"])
+    assert result["annotated"].tobytes() != result["image"].tobytes()
+    picture_dialog.classifier_combo.setCurrentIndex(0)  # re-runs with the detector's names only
+    assert not picture_dialog.tester.has_classifier
+    assert picture_dialog.pieces.item(0).text() == "1. White_Rook  90%"
+    picture_dialog.conf_slider.setValue(50)
+    assert picture_dialog.conf == 0.5 and picture_dialog.conf_label.text() == "50%"
+    not_an_image = tmp_path / "notes.txt"
+    not_an_image.write_text("no picture", encoding="utf-8")
+    assert picture_dialog.test_picture(str(not_an_image)) is None
+    assert "Cannot test this picture" in warnings[-1]
+    picture_dialog.close()
+
     window.use_selected_for_resume()
     assert window.resume_check.isChecked()
 
@@ -138,4 +214,71 @@ def test_yaml_badges_and_sync(app, tmp_path, monkeypatch):
     assert "white-king" in window.log_view.toPlainText()
     assert window._safe_counts([str(a), str(b)]) == {"black-king": 6, "white-king": 6}
     assert (b / "labels" / "board0.txt").read_text(encoding="utf-8").startswith("1 ")
+    window.close()
+
+
+def test_detection_gui_workflow(app, tmp_path, monkeypatch):
+    pytest.importorskip("ultralytics")
+    from conftest import make_yolo_split
+
+    messages, dialogs = [], []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: messages.append(a[2]))
+    monkeypatch.setattr(DetectionReviewDialog, "exec", lambda d: dialogs.append(d) or 0)
+    monkeypatch.setattr(ImageTestDialog, "exec", lambda d: dialogs.append(d) or 0)
+    train = make_yolo_split(tmp_path / "data" / "train")
+    test = make_yolo_split(tmp_path / "data" / "test")
+    manager = ProjectManager(tmp_path / ".projects")
+    window = MainWindow(manager)
+    window.detector_device = "cpu"
+    assert window.task == "detect"
+    assert not window.detect_box.isHidden() and window.quota_box.isHidden()
+    assert all(g.isHidden() for g in window.classify_groups)
+
+    window.train_folders.set_entries([DatasetEntry(str(train))])
+    window.test_folders.set_entries([DatasetEntry(str(test))])
+    window.on_datasets_changed()
+    window.det_base_combo.setCurrentText("yolo26n.yaml")  # built from scratch: no download
+    window.det_epochs_spin.setValue(2)
+    window.det_image_size_spin.setValue(64)
+    window.det_batch_spin.setValue(3)
+    window.det_patience_spin.setValue(0)
+    window.aug_hflip.setChecked(True)
+    assert "fliplr=0.5" in window.aug_preview.text()
+
+    window.start_training()
+    assert window.is_training() and window.pause_button.isEnabled()
+    window.toggle_pause()
+    wait_until(app, lambda: window.paused_checkpoint is not None)
+    assert window.review_folders()[0] == "training pools"
+    window.open_review()
+    assert dialogs and "objects correct" in dialogs[-1].badge.text()
+    window.toggle_pause()
+    wait_until(app, lambda: window.thread is None)
+
+    assert "Training finished: all epochs completed" in messages[-1]
+    weights = window.project_detectors()[0]
+    assert window.checkpoint_list.count() == 1 and window.selected_checkpoint() == weights
+    assert "Started from:</b> yolo26n.yaml" in window.provenance_label.text()
+    assert window.project.evaluations[-1]["type"] == "detect"
+    assert window.project.evaluations[-1]["classes"] == ["black-king", "white-king", "background"]
+    assert window.det_metric_bars["mAP50"].format().endswith("%")
+
+    window.run_final_exam()
+    assert "Test images: 3" in messages[-1]
+    assert window.project.evaluations[-1]["type"] == "detect_test"
+    assert window.baseline_combo.count() == 4  # previous, none, run, exam
+
+    window.open_picture_test()
+    picture_dialog = dialogs[-1]
+    assert picture_dialog.detector_combo.currentData() == weights
+    assert not picture_dialog.tester.has_classifier
+    assert picture_dialog.test_picture(str(next((train / "images").iterdir()))) is not None
+
+    window.use_selected_for_resume()
+    window.task_combo.setCurrentIndex(window.task_combo.findData("classify"))
+    assert window.resume_edit.text() == "" and window.checkpoint_list.count() == 0
+    assert window.detect_box.isHidden() and not window.quota_box.isHidden()
+    window.task_combo.setCurrentIndex(window.task_combo.findData("detect"))
+    assert window.resume_edit.text() == weights
+    assert manager.load("default").detector.resume_from == weights
     window.close()

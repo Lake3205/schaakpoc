@@ -130,6 +130,21 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.ax.legend()
         self.draw_idle()
 
+    def plot_detection_history(self, history: list[dict]):
+        if not history:
+            self.show_message("Metrics per Epoch", "No epochs evaluated yet")
+            return
+        self._reset("Detection Metrics per Epoch (validation)")
+        epochs = [h["epoch"] for h in history]
+        for key, label, style in (("precision", "precision", "-"), ("recall", "recall", "--"),
+                                  ("mAP50", "mAP50", "-"), ("mAP50_95", "mAP50-95", ":")):
+            self.ax.plot(epochs, [h[key] for h in history], ls=style, marker=".", label=label)
+        self.ax.set_xlabel("epoch")
+        self.ax.set_ylim(0, 1.02)
+        self.ax.grid(alpha=0.3)
+        self.ax.legend()
+        self.draw_idle()
+
     def plot_confidence_curves(self, curves: dict):
         if not curves:
             self.show_message("Recall vs. Confidence", "No epochs evaluated yet")

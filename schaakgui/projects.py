@@ -76,8 +76,28 @@ class DatasetEntry:
 
 
 @dataclass
+class DetectorConfig:
+    """Object detection training (bounding boxes, many objects per image) with Ultralytics YOLO."""
+
+    base_model: str = "yolo26m.pt"
+    epochs: int = 50
+    image_size: int = 640
+    batch_size: int = 16
+    patience: int = 20  # Ultralytics early stopping (epochs without improvement), 0 = off
+    snapshot_every: int = 0  # save weights every N epochs (0 = never)
+    num_workers: int = 0
+    mosaic: bool = True
+    resume_from: Optional[str] = None  # fine-tune from earlier detector weights
+
+
+TASKS = {"detect": "Detection (boxes, many objects per image)",
+         "classify": "Classification (one label per crop)"}
+
+
+@dataclass
 class Project:
     name: str
+    task: str = "detect"  # "detect" (default) or "classify"
     train_folders: list[DatasetEntry] = field(default_factory=list)
     val_folders: list[DatasetEntry] = field(default_factory=list)  # evaluated every epoch
     test_folders: list[DatasetEntry] = field(default_factory=list)  # final exam after training
@@ -86,6 +106,7 @@ class Project:
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
     quota: QuotaConfig = field(default_factory=QuotaConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    detector: DetectorConfig = field(default_factory=DetectorConfig)
     resume_checkpoint: Optional[str] = None
     checkpoints: list[str] = field(default_factory=list)
     evaluations: list[dict] = field(default_factory=list)
@@ -117,6 +138,7 @@ class Project:
         data["augmentation"] = _from_dict(AugmentationConfig, data.get("augmentation"))
         data["quota"] = _from_dict(QuotaConfig, data.get("quota"))
         data["training"] = _from_dict(TrainingConfig, data.get("training"))
+        data["detector"] = _from_dict(DetectorConfig, data.get("detector"))
         return _from_dict(cls, data)
 
 
@@ -177,8 +199,12 @@ class ProjectManager:
             shutil.rmtree(directory)
 
     def list_checkpoints(self, project: Project) -> list[str]:
-        """All checkpoint files of a project (saved runs + manually registered ones)."""
+        """All classifier checkpoint files of a project (saved runs + manually registered ones).
+
+        YOLO detector weights in ``checkpoints/detectors`` are a different format and excluded."""
+        detectors = (self.project_dir(project.name) / "checkpoints" / "detectors").resolve()
         found = {str(p.resolve()) for ext in ("*.pt", "*.pth")
-                 for p in self.project_dir(project.name).rglob(ext)}
+                 for p in self.project_dir(project.name).rglob(ext)
+                 if not p.resolve().is_relative_to(detectors)}
         found.update(str(Path(c).resolve()) for c in project.checkpoints if Path(c).exists())
         return sorted(found)

@@ -11,8 +11,8 @@ and **YOLO** (Ultralytics) for detection, running on an NVIDIA RTX 5070 GPU.
 | `detect.py` | Detect pieces from a webcam, image or video |
 | `detect_test.py` | Evaluate the trained model on the labeled test set |
 | `chess.yaml` | Dataset config (12 classes: white/black king, queen, rook, bishop, knight, pawn) |
-| `app.py` | **v2** desktop GUI (PyQt6) to train chess-piece *image classifiers* (see section 6) |
-| `schaakgui/` | Code of the v2 GUI: projects, datasets, augmentations, quotas, checkpoints, training thread |
+| `app.py` | **v3** desktop GUI (PyQt6) to train *object detectors* (default) or *image classifiers* (see section 6) |
+| `schaakgui/` | Code of the GUI: projects, datasets, augmentations, detector/classifier training, quotas, checkpoints |
 
 ## 1. Setup (Windows or Linux, Python 3.10+)
 
@@ -105,13 +105,56 @@ python detect_test.py --show --num 20 --show-conf 0.3 --seed 42
 
 ## 6. schaakpoc v2: training GUI for piece classifiers
 
-`app.py` opens a desktop window for training image classifiers (one cropped piece per image)
-with PyTorch/torchvision:
+`app.py` opens a desktop window for training models on your own datasets (not only chess):
 
 ```bash
 python app.py                      # workspace projects are stored in ./.projects
 python app.py --projects D:/work   # use another workspace directory
 ```
+
+The **Task** selector in the top bar chooses what a project trains (stored per project):
+
+* **Detection (default)** – Ultralytics YOLO object detection: many objects per image, each with its own
+  box and class. Trains on YOLO folders (`images/` + `labels/`, class names from `data.yaml`).
+* **Classification** – one label per image (or per cropped YOLO box) with PyTorch/torchvision.
+
+### Detection task (default)
+
+* **Datasets** – check YOLO training, validation and test folders (add each split, e.g.
+  `datasets/chess/train`, separately; folders without `labels/` are ignored). All folders must use the
+  same class names: run **🔄 Synchronize YAML class names…** first if they differ. Without validation
+  folders the training folders are used for validation.
+* **Training & Quotas → Detection training** – base model (default `yolo26m.pt`, downloaded
+  automatically), epochs, image size, batch size, early stopping *patience* (stops when mAP has not
+  improved for that many epochs; 0 = off), save weights every *N* epochs, data loader workers and mosaic.
+  There are no quotas for detection.
+* **Augmentation** – the same checkboxes, applied box-aware by Ultralytics: flips → `fliplr`/`flipud`,
+  rotation/affine degrees → `degrees`, color jitter → `hsv_h/s/v` (brightness, saturation; contrast is not
+  available), affine → `translate`/`shear`, resized crop → `scale = 1 − minimum scale`. The preview line
+  shows the resulting settings.
+* **▶ Start / ⏸ Pause / ⏹ Stop** – training runs in a background thread. Pause stops after the current
+  batch and saves the current weights (`weights/paused.pt`) so Manual Review and Test own picture can
+  inspect them; Stop finishes after the current batch and keeps the best weights.
+* **Results** – every run is saved in `.projects/<name>/checkpoints/detectors/detector_<stamp>/`
+  (`weights/best.pt`, `last.pt`, Ultralytics plots, `results.csv` and `schaakgui_run.json` with the
+  provenance: data folders, base model, augmentation, metrics). The *Checkpoints & Provenance* tab lists
+  the project's detectors; **Continue from** fine-tunes a new run from one of them, and **Import
+  detector…** copies existing YOLO detector weights (e.g. `runs/chess/weights/best.pt` from `train.py`)
+  into the project (classifier checkpoints are rejected).
+* **Live analytics** – precision, recall, mAP50 and mAP50-95 per epoch, the confusion matrix (with a
+  *background* class for missed and extra boxes), the normalized matrix with Δ against a baseline, and
+  precision/recall vs. confidence.
+* **🎓 Final exam** – evaluates the selected detector on the checked test folders (precision, recall, mAP,
+  per-class results, confusion matrix; recorded in the project).
+* **🔍 Manual Review** – random labeled images with the prediction (left) next to the ground truth
+  (right): green = correct box, orange = wrong class / extra box / missed object, plus the counts.
+* **🖼 Test own picture** – **1. Detector** (the project's detectors, newest or selected first, plus
+  *➕ Add detector file…*) and optional **2. Classifier** (*None* = the detector's own names, or a
+  classifier checkpoint that re-labels every box). Click or drop a picture: every object gets a
+  numbered box, listed on the right. The *Min. confidence* slider trades missed objects against false
+  boxes. Mapping boxes to board squares (8×8 grid) is a possible later, optional feature.
+
+### Classification task
 
 Dataset folders use the `ImageFolder` layout, one sub-folder per class:
 
@@ -163,6 +206,8 @@ Features:
   `correct / needed` validation samples for the accuracy floor (e.g. `9 / 8 (112%)`).
 * **Manual Review** – while paused (validation sets) or after training (test sets), shows random images with ground truth vs.
   top-3 predictions (green border = correct, red = incorrect) with Previous/Next buttons.
+* **Test own picture** – also available here; pick a project detector for the boxes and a classifier
+  checkpoint to name each box (orange = classifier and detector disagree, hover for the top-3).
 * **Analytics** – confusion matrix, normalized confusion matrix, instance count, precision per epoch and
   precision/recall vs. confidence threshold, updated after every validation step. The normalized confusion
   matrix shows the change against the previous run (or a baseline chosen in *Normalized matrix Δ baseline*)

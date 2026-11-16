@@ -5,6 +5,7 @@ import traceback
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 
+from .detector import DetectorJob, DetectorTrainer
 from .engine import Callbacks, Trainer, TrainJob
 
 
@@ -52,8 +53,52 @@ class TrainingWorker(QObject):
 
 def start_worker(job: TrainJob) -> tuple[QThread, TrainingWorker]:
     """Create a worker moved to a new QThread. Connect signals, then call ``thread.start()``."""
+    return _start(TrainingWorker(job))
+
+
+class DetectorWorker(QObject):
+    """Runs :class:`schaakgui.detector.DetectorTrainer` (same signals as :class:`TrainingWorker`)."""
+
+    log = pyqtSignal(str)
+    batch_progress = pyqtSignal(int, int)
+    epoch_progress = pyqtSignal(int, int)
+    evaluated = pyqtSignal(dict)
+    paused = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, job: DetectorJob):
+        super().__init__()
+        self.trainer = DetectorTrainer(job, self.log.emit, self.epoch_progress.emit,
+                                       self.batch_progress.emit, self.evaluated.emit,
+                                       self.paused.emit)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            summary = self.trainer.run()
+        except Exception as e:
+            self.log.emit(traceback.format_exc())
+            self.failed.emit(str(e))
+        else:
+            self.finished.emit(summary)
+
+    def request_stop(self):
+        self.trainer.request_stop()
+
+    def set_paused(self, paused: bool):
+        if paused:
+            self.trainer.pause()
+        else:
+            self.trainer.resume()
+
+
+def start_detector_worker(job: DetectorJob) -> tuple[QThread, DetectorWorker]:
+    return _start(DetectorWorker(job))
+
+
+def _start(worker):
     thread = QThread()
-    worker = TrainingWorker(job)
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
     worker.finished.connect(thread.quit)
