@@ -1,7 +1,7 @@
 # Install PyTorch with CUDA 12.8 FIRST (required for RTX 50-series / Blackwell GPUs):
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 opencv-python
-ultralytics
+ultralytics>=8.4.0  # 8.4.0+ is required for YOLO26
 # schaakpoc v2 training GUI (app.py)
 torchvision
 PyQt6
