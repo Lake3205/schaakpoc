@@ -53,6 +53,17 @@ python train.py              # defaults: 50 epochs, 640px, batch 16, workers 0
 python train.py --epochs 100 --batch 32
 ```
 
+Switch between the available YOLO models with `--yolo` (`yolov8`, `yolo11` (default) or `yolo26`)
+and `--size` (`n`, `s`, `m`, `l`, `x`). The pretrained weights are downloaded automatically:
+
+```bash
+python train.py --yolo yolo26              # YOLO26 nano (yolo26n.pt)
+python train.py --yolo yolo26 --size s     # YOLO26 small (yolo26s.pt)
+python train.py --model my_weights.pt      # any other base model (overrides --yolo/--size)
+```
+
+YOLO26 needs `ultralytics>=8.4.0` (`pip install -U ultralytics`).
+
 `workers=0` avoids Windows multiprocessing memory errors. You can increase it
 with `--workers 2` if your system has enough memory.
 
