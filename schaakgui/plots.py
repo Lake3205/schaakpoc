@@ -1,11 +1,40 @@
 """Matplotlib canvases embedded in the Qt UI."""
 from __future__ import annotations
 
+import math
+from typing import Optional
+
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
-from .metrics import normalize_confusion
+from .metrics import confusion_delta, normalize_confusion
+
+# Precision plot: zoom into the upper range so e.g. 0.80 vs. 0.83 is clearly visible.
+PRECISION_YLIM = (0.75, 1.01)
+# Deltas smaller than this (in percentage points) are shown as neutral.
+DELTA_EPSILON = 0.05
+
+
+def precision_ylim(values, floor: float = PRECISION_YLIM[0],
+                   top: float = PRECISION_YLIM[1]) -> tuple[float, float]:
+    """Y range of the precision plot: ``[floor, top]``, lowered (in 0.05 steps) so that no plotted
+    value below ``floor`` is clipped."""
+    finite = [float(v) for v in values if v is not None and math.isfinite(v)]
+    low = min(finite, default=floor)
+    if low >= floor:
+        return floor, top
+    return max(0.0, math.floor((low - 0.01) * 20) / 20), top
+
+
+def delta_color(delta: float, diagonal: bool, dark_background: bool = False) -> str:
+    """Green for improvements (diagonal gain / off-diagonal drop), red for regressions."""
+    if abs(delta) < DELTA_EPSILON:
+        return "#e0e0e0" if dark_background else "#616161"
+    good = (delta > 0) == diagonal
+    if dark_background:
+        return "#b9f6ca" if good else "#ff8a80"
+    return "#1b5e20" if good else "#b71c1c"
 
 
 class PlotCanvas(FigureCanvasQTAgg):
@@ -26,10 +55,17 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.ax.set_axis_off()
         self.draw_idle()
 
-    def plot_confusion(self, cm, classes: list[str], normalized: bool = False, prefix: str = ""):
+    def plot_confusion(self, cm, classes: list[str], normalized: bool = False, prefix: str = "",
+                       baseline: Optional[dict] = None):
+        """``baseline`` (normalized only): ``{"confusion", "classes", "label"}`` of an earlier run;
+        every cell then also shows the percentage-point change, e.g. ``0.85 (+3.2%)``."""
         title = prefix + ("Normalized Confusion Matrix" if normalized else "Confusion Matrix")
-        self._reset(title)
         cm = np.asarray(cm)
+        delta = None
+        if normalized and baseline:
+            delta = confusion_delta(cm, classes, baseline["confusion"], baseline["classes"])
+            title += f" (Δ vs. {baseline.get('label', 'baseline')})"
+        self._reset(title)
         data = normalize_confusion(cm) if normalized else cm
         image = self.ax.imshow(data, cmap="Blues", vmin=0, vmax=1 if normalized else None)
         self.figure.colorbar(image, ax=self.ax, fraction=0.046, pad=0.04)
@@ -42,9 +78,17 @@ class PlotCanvas(FigureCanvasQTAgg):
             threshold = data.max() / 2 if data.size and data.max() > 0 else 0
             for r in range(data.shape[0]):
                 for c in range(data.shape[1]):
+                    dark = data[r, c] > threshold
+                    color = "white" if dark else "black"
+                    if delta is not None and not np.isnan(delta[r, c]):
+                        self.ax.text(c, r - 0.17, f"{data[r, c]:.2f}", ha="center", va="center",
+                                     fontsize=6, color=color)
+                        self.ax.text(c, r + 0.22, f"({delta[r, c]:+.1f}%)", ha="center",
+                                     va="center", fontsize=5,
+                                     color=delta_color(delta[r, c], r == c, dark))
+                        continue
                     text = f"{data[r, c] * 100:.0f}%" if normalized else str(int(data[r, c]))
-                    self.ax.text(c, r, text, ha="center", va="center", fontsize=6,
-                                 color="white" if data[r, c] > threshold else "black")
+                    self.ax.text(c, r, text, ha="center", va="center", fontsize=6, color=color)
         self.draw_idle()
 
     def plot_counts(self, counts: dict[str, int], title: str = "Instance Count",
@@ -80,7 +124,8 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.ax.plot(epochs, [h["recall"] for h in history], marker=".", ls="--", label="recall")
         self.ax.plot(epochs, [h["val_acc"] for h in history], ls=":", label="val accuracy")
         self.ax.set_xlabel("epoch")
-        self.ax.set_ylim(0, 1.05)
+        self.ax.set_ylim(*precision_ylim(
+            [h[k] for h in history for k in ("precision", "recall", "val_acc")]))
         self.ax.grid(alpha=0.3)
         self.ax.legend()
         self.draw_idle()

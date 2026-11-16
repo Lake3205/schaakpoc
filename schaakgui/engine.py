@@ -355,6 +355,7 @@ class Trainer:
                 "curves": confidence_curves(ev["confidences"],
                                             np.asarray(ev["y_true"]) == np.asarray(ev["y_pred"])),
                 "quota_status": dict(quota.current),
+                "quota_values": dict(quota.values),
                 "checkpoint": str(last_path.resolve()),
             })
             self.cb.epoch_progress(i + 1, cfg.epochs)

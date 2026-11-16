@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import html
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -16,8 +18,10 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -30,6 +34,8 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -37,12 +43,14 @@ from PyQt6.QtWidgets import (
 )
 
 from .checkpoint import ARCHITECTURES, Lineage, read_lineage, session_val_folders
-from .data import class_counts, enabled_augmentations
+from .data import class_counts, dataset_yaml, enabled_augmentations
 from .engine import TrainJob, evaluate_checkpoint
 from .plots import PlotCanvas
-from .projects import DatasetEntry, Project, ProjectManager
-from .quota import OBJECTIVES, QuotaTracker, objective_threshold
+from .projects import DatasetEntry, Project, ProjectManager, QuotaConfig
+from .quota import OBJECTIVES, QuotaTracker, class_progress, objective_progress, objective_threshold
 from .review_dialog import ReviewDialog, ReviewSession
+from .sync_dialog import YamlSyncDialog
+from .yaml_sync import unique_yaml_paths
 from .worker import TrainingWorker, start_worker
 
 STOP_REASONS = {
@@ -75,6 +83,30 @@ def _dspin(minimum, maximum, decimals=2, step=0.1, suffix="") -> QDoubleSpinBox:
     box.setSingleStep(step)
     box.setSuffix(suffix)
     return box
+
+
+def _badge_icon(color: str, symbol: str) -> QIcon:
+    """Small round status badge (e.g. green ✓ = .yaml detected)."""
+    pixmap = QPixmap(16, 16)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(color))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawEllipse(1, 1, 14, 14)
+    painter.setPen(QColor("white"))
+    font = painter.font()
+    font.setPixelSize(10)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, symbol)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _progress_style(met: bool) -> str:
+    color = "#43a047" if met else "#fb8c00"
+    return f"QProgressBar::chunk {{ background-color: {color}; }} QProgressBar {{ text-align: center; }}"
 
 
 class FolderList(QGroupBox):
@@ -111,7 +143,34 @@ class FolderList(QGroupBox):
         item = QListWidgetItem(entry.path)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(Qt.CheckState.Checked if entry.checked else Qt.CheckState.Unchecked)
+        self._update_badge(item)
         self.list.addItem(item)
+
+    @staticmethod
+    def _update_badge(item: QListWidgetItem):
+        """Status badge: green ✓ if a .yaml configuration was detected for the folder."""
+        try:
+            path = dataset_yaml(item.text())
+        except OSError:
+            path = None
+        item.setData(Qt.ItemDataRole.UserRole, str(path) if path else None)
+        if path:
+            item.setIcon(_badge_icon("#2e7d32", "✓"))
+            item.setToolTip(f"YAML detected: {path}")
+        else:
+            item.setIcon(_badge_icon("#9e9e9e", "–"))
+            item.setToolTip("No .yaml configuration detected")
+
+    def refresh_badges(self):
+        self.list.blockSignals(True)
+        for i in range(self.list.count()):
+            self._update_badge(self.list.item(i))
+        self.list.blockSignals(False)
+
+    def yaml_paths(self) -> list[str]:
+        """Detected .yaml files of all folders (checked or not)."""
+        values = (self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count()))
+        return [v for v in values if v]
 
     def remove_selected(self):
         for item in self.list.selectedItems():
@@ -144,8 +203,12 @@ class MainWindow(QMainWindow):
         self.paused_checkpoint: Optional[str] = None
         self.last_checkpoint: Optional[str] = None
         self._loading = False
+        # Matrix currently shown in the analytics ({confusion, classes, prefix}) and the previous
+        # run it is compared with in the normalized confusion matrix.
+        self.current_eval: Optional[dict] = None
+        self.previous_baseline: Optional[dict] = None
 
-        self.setWindowTitle("schaakpoc v2.1 – Chess Piece Classifier Trainer")
+        self.setWindowTitle("schaakpoc v2.2 – Chess Piece Classifier Trainer")
         self.resize(1500, 950)
         central = QWidget()
         root = QVBoxLayout(central)
@@ -197,6 +260,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.train_folders)
         layout.addWidget(self.val_folders)
         layout.addWidget(self.test_folders)
+        sync_row = QHBoxLayout()
+        self.sync_yaml_button = QPushButton("🔄 Synchronize YAML class names…")
+        self.sync_yaml_button.setToolTip(
+            "Merge differently named classes (e.g. W-R and White-Rook) across the detected .yaml "
+            "files and re-index the class ids of their YOLO label files.")
+        self.sync_yaml_button.clicked.connect(self.open_yaml_sync)
+        sync_row.addWidget(QLabel("<small>✓ = .yaml configuration detected</small>"))
+        sync_row.addStretch()
+        sync_row.addWidget(self.sync_yaml_button)
+        layout.addLayout(sync_row)
         help_label = QLabel(
             "<small>Folders contain one sub-folder per class (<code>class_name/xxx.jpg</code>) or are "
             "a YOLO split (<code>images/</code> + <code>labels/</code>, class names from "
@@ -418,6 +491,27 @@ class MainWindow(QMainWindow):
         progress.addRow("Total run progress", self.run_progress)
         layout.addLayout(progress)
 
+        quota_box = QGroupBox("Live quota check (current / target)")
+        quota_grid = QGridLayout(quota_box)
+        quota_grid.setContentsMargins(6, 2, 6, 2)
+        self.quota_bars: dict[str, QProgressBar] = {}
+        for i, (key, label) in enumerate(OBJECTIVES.items()):
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            self.quota_bars[key] = bar
+            quota_grid.addWidget(QLabel(label), i // 2, (i % 2) * 2)
+            quota_grid.addWidget(bar, i // 2, (i % 2) * 2 + 1)
+        layout.addWidget(quota_box)
+
+        baseline_row = QHBoxLayout()
+        self.baseline_combo = QComboBox()
+        self.baseline_combo.setMinimumWidth(260)
+        self.baseline_combo.currentIndexChanged.connect(lambda _i: self.render_normalized_confusion())
+        baseline_row.addWidget(QLabel("Normalized matrix Δ baseline:"))
+        baseline_row.addWidget(self.baseline_combo)
+        baseline_row.addStretch()
+        layout.addLayout(baseline_row)
+
         splitter = QSplitter(Qt.Orientation.Vertical)
         self.analytics = QTabWidget()
         self.cm_canvas = PlotCanvas()
@@ -425,11 +519,21 @@ class MainWindow(QMainWindow):
         self.count_canvas = PlotCanvas()
         self.precision_canvas = PlotCanvas()
         self.conf_canvas = PlotCanvas()
+        self.class_quota_table = QTableWidget(0, 4)
+        self.class_quota_table.setHorizontalHeaderLabels(
+            ["Class", "Correct / needed", "Accuracy / target", "Progress"])
+        self.class_quota_table.verticalHeader().setVisible(False)
+        self.class_quota_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        header = self.class_quota_table.horizontalHeader()
+        for column in range(3):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.analytics.addTab(self.cm_canvas, "Confusion Matrix")
         self.analytics.addTab(self.cm_norm_canvas, "Normalized Confusion Matrix")
         self.analytics.addTab(self.count_canvas, "Instance Count")
         self.analytics.addTab(self.precision_canvas, "Precision Curve")
         self.analytics.addTab(self.conf_canvas, "Recall vs. Confidence")
+        self.analytics.addTab(self.class_quota_table, "Class Quotas")
         splitter.addWidget(self.analytics)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
@@ -465,7 +569,9 @@ class MainWindow(QMainWindow):
         self._load_form(self.project)
         self.last_checkpoint = None
         self.paused_checkpoint = None
+        self.previous_baseline = None
         self._reset_analytics()
+        self.refresh_baselines()
         self.refresh_checkpoints()
         self.statusBar().showMessage(f"Loaded project '{name}'")
         self.log(f"Project '{name}' loaded.")
@@ -643,6 +749,27 @@ class MainWindow(QMainWindow):
         self.count_canvas.plot_counts(train, "Instance Count (selected datasets)",
                                       {"validation": val, "test": test})
 
+    def open_yaml_sync(self):
+        """Harmonize the class names of all detected .yaml files (and re-index their labels)."""
+        lists = (self.train_folders, self.val_folders, self.test_folders)
+        for folder_list in lists:
+            folder_list.refresh_badges()
+        paths = unique_yaml_paths(p for folder_list in lists for p in folder_list.yaml_paths())
+        if not paths:
+            QMessageBox.information(self, "Synchronize YAML class names",
+                                    "No .yaml configuration was detected in the dataset folders.")
+            return
+        dialog = YamlSyncDialog(paths, self)
+        if not dialog.exec() or dialog.report is None:
+            return
+        report = dialog.report
+        self.log(f"YAML class names synchronized: {len(report['yaml_files'])} .yaml file(s) "
+                 f"rewritten, {report['boxes']} label(s) in {report['label_files']} file(s) "
+                 f"re-indexed. Classes: " + ", ".join(report["names"]))
+        for folder_list in lists:
+            folder_list.refresh_badges()
+        self.on_datasets_changed()
+
     def update_aug_preview(self):
         if self._loading or self.project is None:
             return
@@ -698,6 +825,7 @@ class MainWindow(QMainWindow):
                                 f"Checkpoint not found:\n{job.resume_checkpoint}")
             return
         self._reset_analytics(keep_counts=True)
+        self.previous_baseline = self._latest_evaluation(test=False)
         self.batch_progress.setValue(0)
         self.run_progress.setMaximum(job.training.epochs)
         self.run_progress.setValue(0)
@@ -744,7 +872,9 @@ class MainWindow(QMainWindow):
     def on_evaluated(self, payload: dict):
         classes = payload["classes"]
         self.cm_canvas.plot_confusion(payload["confusion"], classes)
-        self.cm_norm_canvas.plot_confusion(payload["confusion"], classes, normalized=True)
+        self.current_eval = {"confusion": payload["confusion"], "classes": classes, "prefix": ""}
+        self.render_normalized_confusion()
+        self.update_quota_counters(payload.get("quota_values", {}), payload["confusion"], classes)
         self.precision_canvas.plot_precision(payload["history"])
         self.conf_canvas.plot_confidence_curves(payload["curves"])
         self.last_checkpoint = payload["checkpoint"]
@@ -763,11 +893,15 @@ class MainWindow(QMainWindow):
             record = {k: summary[k] for k in ("finished_at", "stop_reason", "total_epochs_completed",
                                               "epochs_this_session", "last_checkpoint",
                                               "best_checkpoint", "metrics", "milestones")}
+            if self.current_eval is not None and not self.current_eval["prefix"]:
+                record["confusion"] = self.current_eval["confusion"]
+                record["classes"] = self.current_eval["classes"]
             self.project.evaluations.append(record)
             for path in (summary["last_checkpoint"], summary["best_checkpoint"]):
                 if path and path not in self.project.checkpoints:
                     self.project.checkpoints.append(path)
             self.manager.save(self.project)
+            self.refresh_baselines()
         if summary["last_checkpoint"]:
             self.last_checkpoint = summary["last_checkpoint"]
         self.refresh_checkpoints(select=self.last_checkpoint)
@@ -967,8 +1101,14 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.cm_canvas.plot_confusion(result["confusion"], result["classes"], prefix="Test – ")
-        self.cm_norm_canvas.plot_confusion(result["confusion"], result["classes"], normalized=True,
-                                           prefix="Test – ")
+        confusion = [list(map(int, row)) for row in result["confusion"]]
+        self.previous_baseline = self._latest_evaluation(test=True)
+        self.current_eval = {"confusion": confusion, "classes": list(result["classes"]),
+                             "prefix": "Test – "}
+        self.render_normalized_confusion()
+        self.update_quota_counters({"accuracy_floor": result["accuracy"],
+                                    "confidence_floor": result["mean_confidence"]},
+                                   confusion, list(result["classes"]))
         self.conf_canvas.plot_confidence_curves(result["curves"])
         summary = (f"Test samples: {result['samples']}\n"
                    f"Accuracy: {result['accuracy'] * 100:.1f}%\n"
@@ -986,12 +1126,95 @@ class MainWindow(QMainWindow):
             "finished_at": datetime.now().isoformat(timespec="seconds"),
             **{k: result[k] for k in ("checkpoint", "test_folders", "samples", "loss", "accuracy",
                                       "mean_confidence", "precision", "recall", "seen_in_training")},
+            "confusion": confusion,
+            "classes": list(result["classes"]),
         })
         self.manager.save(self.project)
+        self.refresh_baselines()
         QMessageBox.information(self, "Final exam", summary)
+
+    # ------------------------------------------------- baselines & live quota
+    @staticmethod
+    def _evaluation_label(record: dict) -> str:
+        when = record.get("finished_at", "?")
+        if record.get("type") == "test":
+            return f"Test exam {when} (acc {record.get('accuracy', 0) * 100:.1f}%)"
+        acc = (record.get("metrics") or {}).get("val_acc")
+        return f"Training run {when}" + (f" (val acc {acc * 100:.1f}%)" if acc is not None else "")
+
+    def _latest_evaluation(self, test: bool) -> Optional[dict]:
+        """The newest stored training run (or test exam) with a confusion matrix, as a baseline."""
+        if self.project is None:
+            return None
+        for record in reversed(self.project.evaluations):
+            if (record.get("type") == "test") == test and record.get("confusion") \
+                    and record.get("classes"):
+                return {"confusion": record["confusion"], "classes": record["classes"],
+                        "label": "previous " + ("exam" if test else "run")}
+        return None
+
+    def refresh_baselines(self):
+        current = self.baseline_combo.currentData()
+        self.baseline_combo.blockSignals(True)
+        self.baseline_combo.clear()
+        self.baseline_combo.addItem("Previous run", "previous")
+        self.baseline_combo.addItem("No comparison", "none")
+        records = self.project.evaluations if self.project is not None else []
+        for i in reversed(range(len(records))):
+            if records[i].get("confusion") and records[i].get("classes"):
+                self.baseline_combo.addItem(self._evaluation_label(records[i]), i)
+        index = self.baseline_combo.findData(current) if current is not None else -1
+        self.baseline_combo.setCurrentIndex(max(0, index))
+        self.baseline_combo.blockSignals(False)
+
+    def selected_baseline(self) -> Optional[dict]:
+        data = self.baseline_combo.currentData()
+        if data == "previous":
+            return self.previous_baseline
+        if isinstance(data, int) and self.project is not None \
+                and 0 <= data < len(self.project.evaluations):
+            record = self.project.evaluations[data]
+            return {"confusion": record["confusion"], "classes": record["classes"],
+                    "label": self.baseline_combo.currentText()}
+        return None
+
+    def render_normalized_confusion(self):
+        if self.current_eval is None:
+            return
+        self.cm_norm_canvas.plot_confusion(self.current_eval["confusion"],
+                                           self.current_eval["classes"], normalized=True,
+                                           prefix=self.current_eval["prefix"],
+                                           baseline=self.selected_baseline())
+
+    def update_quota_counters(self, values: dict, confusion=None, classes=None):
+        """Live ``current / target`` counters of the quota objectives and of every class."""
+        quota = self.project.quota if self.project is not None else QuotaConfig()
+        for row in objective_progress(quota, values):
+            bar = self.quota_bars[row["objective"]]
+            bar.setValue(0 if row["ratio"] is None else min(100, math.floor(row["ratio"] * 100)))
+            bar.setFormat(row["text"])
+            bar.setToolTip(f"{row['label']}: current / target (share of the target reached)")
+            bar.setStyleSheet(_progress_style(row["met"]))
+        rows = class_progress(confusion, classes, quota.min_accuracy) if confusion is not None else []
+        table = self.class_quota_table
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            accuracy = "–" if row["accuracy"] is None else f"{row['accuracy'] * 100:.1f}%"
+            table.setItem(r, 0, QTableWidgetItem(row["class"]))
+            table.setItem(r, 1, QTableWidgetItem(f"{row['correct']} / {row['needed']} "
+                                                 f"(of {row['total']})"))
+            table.setItem(r, 2, QTableWidgetItem(f"{accuracy} / {quota.min_accuracy * 100:.1f}%"))
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0 if row["ratio"] is None else min(100, math.floor(row["ratio"] * 100)))
+            bar.setFormat(row["text"])
+            bar.setStyleSheet(_progress_style(row["met"]))
+            table.setCellWidget(r, 3, bar)
 
     # ------------------------------------------------------------------ misc
     def _reset_analytics(self, keep_counts: bool = False):
+        self.current_eval = None
+        self.update_quota_counters({})
         self.cm_canvas.show_message("Confusion Matrix", "Waiting for the first validation step")
         self.cm_norm_canvas.show_message("Normalized Confusion Matrix",
                                          "Waiting for the first validation step")
