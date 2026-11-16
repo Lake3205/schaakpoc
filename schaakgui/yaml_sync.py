@@ -102,10 +102,21 @@ def _class_id(token: str) -> Optional[int]:
     return int(value) if value.is_integer() and value >= 0 else None
 
 
-def _write_text(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+def _write_all(contents: dict[Path, str]) -> None:
+    """Write several files (nearly) all-or-nothing: every new content is staged in a ``.tmp`` file
+    first; the originals are only replaced once all files were staged successfully."""
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for path, text in contents.items():
+            tmp = path.with_name(path.name + ".sync.tmp")
+            staged.append((tmp, path))
+            tmp.write_text(text, encoding="utf-8")
+    except BaseException:
+        for tmp, _ in staged:
+            tmp.unlink(missing_ok=True)
+        raise
+    for tmp, path in staged:
+        tmp.replace(path)
 
 
 def apply_mapping(yaml_paths: Sequence[str | Path], mapping: dict[str, str]) -> dict:
@@ -132,7 +143,8 @@ def apply_mapping(yaml_paths: Sequence[str | Path], mapping: dict[str, str]) -> 
                         names.append(target)
     index = {name: i for i, name in enumerate(names)}
 
-    changed_labels = changed_boxes = 0
+    contents: dict[Path, str] = {}
+    changed_boxes = 0
     for path in paths:
         remap = {old: index[_target(mapping, name)] for old, name in per_yaml[path].items()}
         for label_file in files[path]:
@@ -147,16 +159,17 @@ def apply_mapping(yaml_paths: Sequence[str | Path], mapping: dict[str, str]) -> 
                 lines[i] = f"{match.group(1)}{remap[cls]}{match.group(3)}"
                 changed += 1
             if changed:
-                _write_text(label_file, "".join(lines))
-                changed_labels += 1
+                contents[label_file] = "".join(lines)
                 changed_boxes += changed
+    changed_labels = len(contents)
 
     for path in paths:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         data["names"] = list(names)
         data["nc"] = len(names)
-        _write_text(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        contents[path] = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    _write_all(contents)
 
     return {"names": names, "yaml_files": [str(p) for p in paths],
             "label_files": changed_labels, "boxes": changed_boxes}

@@ -70,3 +70,31 @@ def test_apply_mapping_rewrites_yaml_and_labels(tmp_path):
     assert set(scan_folder(a_train)) == {"white-rook", "black-king"}
     assert set(scan_folder(b_train)) == {"white-rook", "black-king", "class_2"}
     assert len(scan_folder(b_train)["white-rook"]) == 3
+
+
+def test_apply_mapping_is_all_or_nothing(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    a_train, _, b_train = _two_datasets(tmp_path)
+    yaml_paths = [a_train.parent / "data.yaml", b_train / "data.yaml"]
+    originals = {p: p.read_text(encoding="utf-8")
+                 for p in [*yaml_paths, *(b_train / "labels").glob("*.txt")]}
+    write_text = Path.write_text
+
+    def failing_write(self, *args, **kwargs):
+        if self.parent == b_train and self.name.startswith("data.yaml"):  # last file staged
+            raise OSError("disk full")
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing_write)
+    try:
+        apply_mapping(yaml_paths, {"Black_King": "black-king", "White-Rook": "W-R"})
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected OSError")
+    monkeypatch.undo()
+    assert all(p.read_text(encoding="utf-8") == text for p, text in originals.items())
+    assert not list((tmp_path / "yolo").rglob("*.tmp"))
+    report = apply_mapping(yaml_paths, {"Black_King": "black-king", "White-Rook": "W-R"})
+    assert report["boxes"] == 6  # B's labels were still untouched, so they are swapped exactly once
