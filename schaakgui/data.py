@@ -5,7 +5,9 @@ Two folder layouts are supported:
 * ImageFolder: ``class_name/xxx.jpg`` - the sub-folder name is the label.
 * YOLO: ``images/xxx.jpg`` + ``labels/xxx.txt`` (e.g. ``datasets/chess/train``). Every labeled box is
   cropped from its image and becomes one sample; class names come from the ``names`` of a
-  ``data.yaml`` in the folder or one of its two parent folders.
+  ``data.yaml`` in the folder or one of its two parent folders. With a crop fraction below 100 %
+  (see :meth:`MultiFolderImageDataset.epoch_dataset`) the remaining YOLO images are trained as full
+  pictures with a multi-label target instead.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+import torch
 import yaml
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset
@@ -27,6 +30,8 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 # Normalized (x1, y1, x2, y2) crop box of a YOLO label, ``None`` for the whole image.
 Box = Optional[tuple[float, float, float, float]]
+# Whole (EXIF-rotated) picture of a YOLO image, used instead of a crop.
+FULL_BOX = (0.0, 0.0, 1.0, 1.0)
 
 
 def is_image(path: Path) -> bool:
@@ -72,6 +77,27 @@ def yolo_class_names(split_dir: str | Path) -> dict[int, str]:
                 if names:
                     return names
     return {}
+
+
+def resolve_placeholder_classes(classes: Sequence[str], folders: Sequence[str | Path]) -> list[str]:
+    """Rename ``class_N`` placeholders (YOLO data without class names) using the folders' yaml names.
+
+    Checkpoints trained before a ``data.yaml`` was available store ``class_N``; the model output order
+    is kept, only the names are replaced so the checkpoint matches the now-named dataset classes.
+    """
+    names: dict[int, str] = {}
+    for folder in folders:
+        dirs = yolo_dirs(folder)
+        if dirs:
+            for idx, name in yolo_class_names(dirs[0].parent).items():
+                names.setdefault(idx, name)
+    if not names:
+        return list(classes)
+    resolved = []
+    for name in classes:
+        idx = name[len("class_"):] if name.startswith("class_") else ""
+        resolved.append(names.get(int(idx), name) if idx.isdigit() else name)
+    return resolved if len(set(resolved)) == len(resolved) else list(classes)
 
 
 def read_yolo_labels(label_file: str | Path) -> list[tuple[int, tuple[float, float, float, float]]]:
@@ -226,6 +252,24 @@ class MultiFolderImageDataset(Dataset):
             self.folders, self.classes, transform, [self.samples[i] for i in indices]
         )
 
+    def epoch_dataset(self, crop_fraction: float, rng: random.Random) -> "MixedEpochDataset":
+        """One epoch's training set: a random ``crop_fraction`` of the YOLO images is cropped per
+        box (single-label samples); every other YOLO image is used as the full picture with all of
+        its piece classes as multi-label target. ImageFolder images are always single-label."""
+        by_image: dict[str, list[tuple[str, int, Box]]] = {}
+        for sample in self.samples:
+            by_image.setdefault(sample[0], []).append(sample)
+        yolo_images = sorted(p for p, items in by_image.items() if items[0][2] is not None)
+        k = min(len(yolo_images), round(len(yolo_images) * max(0.0, crop_fraction)))
+        cropped = set(rng.sample(yolo_images, k))
+        entries = []
+        for path, items in by_image.items():
+            if items[0][2] is None or path in cropped:
+                entries.extend((p, (cls,), box, False) for p, cls, box in items)
+            else:
+                entries.append((path, tuple(sorted({cls for _, cls, _ in items})), FULL_BOX, True))
+        return MixedEpochDataset(entries, len(self.classes), self.transform)
+
     def split(self, val_fraction: float, seed: Optional[int], train_transform, val_transform):
         """Random train/validation split (used when no validation folders are selected)."""
         indices = list(range(len(self.samples)))
@@ -233,6 +277,39 @@ class MultiFolderImageDataset(Dataset):
         n_val = max(1, int(round(len(indices) * val_fraction))) if len(indices) > 1 else 0
         return (self.subset(indices[n_val:], train_transform),
                 self.subset(indices[:n_val], val_transform))
+
+
+class MixedEpochDataset(Dataset):
+    """Training samples mixing crops and full pictures.
+
+    Items are ``(image, target, is_full)``: ``target`` is a float vector over the classes (one-hot
+    for a crop, multi-hot with every piece class present for a full picture).
+    """
+
+    def __init__(self, entries: list[tuple[str, tuple[int, ...], Box, bool]], num_classes: int,
+                 transform: Optional[Callable] = None):
+        self.entries = entries
+        self.num_classes = num_classes
+        self.transform = transform
+        self.loader = default_loader
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    @property
+    def num_full(self) -> int:
+        return sum(1 for e in self.entries if e[3])
+
+    def __getitem__(self, index: int):
+        path, classes, box, is_full = self.entries[index]
+        image = self.loader(path)
+        if box is not None:
+            image = crop_box(ImageOps.exif_transpose(image), box)
+        if self.transform is not None:
+            image = self.transform(image)
+        target = torch.zeros(self.num_classes)
+        target[list(classes)] = 1.0
+        return image, target, is_full
 
 
 def augmentation_steps(aug: AugmentationConfig, image_size: int) -> list:

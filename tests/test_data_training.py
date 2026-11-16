@@ -9,6 +9,7 @@ from schaakgui.data import (
     discover_classes,
     enabled_augmentations,
     read_yolo_labels,
+    resolve_placeholder_classes,
     scan_folder,
 )
 from schaakgui.engine import Callbacks, Trainer, TrainJob, evaluate_checkpoint
@@ -135,6 +136,15 @@ def test_yolo_labels_are_cropped_per_box(tmp_path):
     assert set(scan_folder(other)) == {"class_0", "class_1"}
 
 
+def test_placeholder_checkpoint_classes_get_yaml_names(tmp_path):
+    from conftest import make_yolo_split
+
+    split = make_yolo_split(tmp_path / "chess" / "train")
+    assert resolve_placeholder_classes(["class_1", "class_0", "other"], [split]) == \
+        ["white-king", "black-king", "other"]
+    assert resolve_placeholder_classes(["class_0"], [tmp_path]) == ["class_0"]
+
+
 def test_yolo_training_and_final_exam(datasets, tmp_path):
     from conftest import make_yolo_split
 
@@ -153,6 +163,33 @@ def test_yolo_training_and_final_exam(datasets, tmp_path):
     assert evaluate_checkpoint(summary["last_checkpoint"], [str(val)])["seen_in_training"] == [str(val)]
     with pytest.raises(ValueError):
         evaluate_checkpoint(summary["last_checkpoint"], [])
+
+
+def test_crop_fraction_mixes_crops_and_multilabel_full_pictures(datasets, tmp_path):
+    import random
+
+    from conftest import make_yolo_split
+
+    train = make_yolo_split(tmp_path / "yolo" / "train")
+    ds = MultiFolderImageDataset([train], ["black-king", "white-king"])
+    assert ds.epoch_dataset(1.0, random.Random(0)).num_full == 0
+    mixed = ds.epoch_dataset(0.34, random.Random(0))  # 1 of 3 images cropped (2 boxes)
+    assert mixed.num_full == 2 and len(mixed) == 4
+    full = [mixed[i] for i in range(len(mixed)) if mixed[i][2]]
+    assert all(t.tolist() == [1.0, 1.0] for _, t, _ in full)
+    crops = [mixed[i] for i in range(len(mixed)) if not mixed[i][2]]
+    assert sorted(t.tolist() for _, t, _ in crops) == [[0.0, 1.0], [1.0, 0.0]]
+    assert full[0][0].size == (40, 20) and crops[0][0].size == (20, 20)
+
+    logs = []
+    summary = Trainer(_job(datasets, tmp_path / "f", train_folders=[str(train)],
+                           val_folders=[str(make_yolo_split(tmp_path / "yolo" / "valid"))],
+                           training=TrainingConfig(epochs=2, batch_size=2, image_size=32,
+                                                   crop_fraction=0.34)),
+                      Callbacks(log=logs.append)).run()
+    assert summary["stop_reason"] == "completed"
+    assert any("34% of the 3 YOLO training images are cropped" in m for m in logs)
+    assert sum("2 cropped samples, 2 full pictures (multi-label)" in m for m in logs) == 2
 
 
 def test_test_folders_are_not_used_during_training(datasets, tmp_path):

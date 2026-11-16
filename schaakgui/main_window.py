@@ -288,7 +288,14 @@ class MainWindow(QMainWindow):
         self.arch_combo.addItems(ARCHITECTURES)
         self.pretrained_check = QCheckBox("Start from ImageNet weights (download)")
         self.workers_spin = _spin(0, 32, 0)
+        self.crop_fraction_spin = _dspin(0, 100, 0, 5, " %")
+        self.crop_fraction_spin.setValue(100)
+        self.crop_fraction_spin.setToolTip(
+            "Share of YOLO images cropped into one sample per piece, drawn at random each epoch. "
+            "The other images are trained as full pictures with all their pieces as labels at once "
+            "(multi-label).")
         form.addRow("Epochs (this session)", self.epochs_spin)
+        form.addRow("Cropped images per epoch", self.crop_fraction_spin)
         form.addRow("Batch size", self.batch_spin)
         form.addRow("Learning rate", self.lr_spin)
         form.addRow("Image size", self.image_size_spin)
@@ -539,6 +546,7 @@ class MainWindow(QMainWindow):
         self.arch_combo.setCurrentText(t.architecture)
         self.pretrained_check.setChecked(t.pretrained)
         self.workers_spin.setValue(t.num_workers)
+        self.crop_fraction_spin.setValue(t.crop_fraction * 100)
 
         q = p.quota
         self.min_acc_spin.setValue(q.min_accuracy * 100)
@@ -591,6 +599,7 @@ class MainWindow(QMainWindow):
         t.architecture = self.arch_combo.currentText()
         t.pretrained = self.pretrained_check.isChecked()
         t.num_workers = self.workers_spin.value()
+        t.crop_fraction = self.crop_fraction_spin.value() / 100
 
         q = p.quota
         q.min_accuracy = self.min_acc_spin.value() / 100

@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .checkpoint import load_checkpoint, model_from_checkpoint
-from .data import MultiFolderImageDataset, build_eval_transform
+from .data import MultiFolderImageDataset, build_eval_transform, resolve_placeholder_classes
 
 
 class ReviewSession:
@@ -26,7 +26,7 @@ class ReviewSession:
 
     def __init__(self, checkpoint_path: str, folders: list[str], seed: Optional[int] = None):
         ckpt = load_checkpoint(checkpoint_path)
-        self.classes = list(ckpt["classes"])
+        self.classes = resolve_placeholder_classes(ckpt["classes"], folders)
         self.model = model_from_checkpoint(ckpt).eval()
         self.transform = build_eval_transform(int(ckpt["image_size"]))
         self.dataset = MultiFolderImageDataset(folders, self.classes)

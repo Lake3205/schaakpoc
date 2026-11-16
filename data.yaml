@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 12
+names: ['Black-Bishop', 'Black-King', 'Black-Knight', 'Black-Pawn', 'Black-Queen', 'Black-Rook', 'White-Bishop', 'White-King', 'White-Knight', 'White-Pawn', 'White-Queen', 'White-Rook']
+
+roboflow:
+  workspace: rookeye
+  project: rookeye
+  version: 29
+  license: MIT
+  url: https://universe.roboflow.com/rookeye/rookeye/dataset/29

@@ -64,6 +64,9 @@ class TrainingConfig:
     architecture: str = "resnet18"
     pretrained: bool = False
     num_workers: int = 0
+    # Share of YOLO images cropped into one sample per piece, drawn at random each epoch; the other
+    # images are trained as full pictures with all their piece classes as a multi-label target.
+    crop_fraction: float = 1.0
 
 
 @dataclass

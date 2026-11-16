@@ -20,6 +20,7 @@ from .data import (
     build_train_transform,
     discover_classes,
     enabled_augmentations,
+    resolve_placeholder_classes,
 )
 from .metrics import confidence_curves, confusion_matrix, macro_precision_recall
 from .projects import AugmentationConfig, QuotaConfig, TrainingConfig
@@ -99,7 +100,7 @@ def evaluate_checkpoint(checkpoint_path: str, folders: list[str], batch_size: in
     if not folders:
         raise ValueError("Select at least one test folder.")
     ckpt = load_checkpoint(checkpoint_path)
-    classes = list(ckpt["classes"])
+    classes = resolve_placeholder_classes(ckpt["classes"], folders)
     dataset = MultiFolderImageDataset(folders, classes, build_eval_transform(int(ckpt["image_size"])))
     if len(dataset) == 0:
         raise ValueError("The selected test folders contain no images of the model's classes.")
@@ -178,7 +179,9 @@ class Trainer:
 
         ckpt = load_checkpoint(job.resume_checkpoint) if job.resume_checkpoint else None
         if ckpt is not None:
-            classes = list(ckpt["classes"])
+            classes = resolve_placeholder_classes(ckpt["classes"], job.train_folders)
+            if classes != list(ckpt["classes"]):
+                log("Renamed placeholder class names from the checkpoint using the dataset yaml.")
             architecture, image_size = ckpt["architecture"], int(ckpt["image_size"])
             lineage = Lineage.from_dict(ckpt.get("lineage"))
             unknown = sorted(set(discover_classes(job.train_folders)) - set(classes))
@@ -216,6 +219,12 @@ class Trainer:
             raise ValueError("Training (at least 2 images) and validation sets must contain images.")
         log(f"Training samples: {len(train_ds)}, validation samples: {len(val_ds)}, "
             f"shuffle: {'on' if job.shuffle else 'off'}, seed: {job.seed}")
+        crop_fraction = min(1.0, max(0.0, float(cfg.crop_fraction)))
+        if crop_fraction < 1.0:
+            n_images = len({s[0] for s in train_ds.samples if s[2] is not None})
+            log(f"Each epoch {crop_fraction:.0%} of the {n_images} YOLO training images are cropped "
+                f"per piece; the others are trained as full pictures with all their pieces as "
+                f"multi-label target.")
 
         generator = None
         if job.seed is not None:
@@ -223,10 +232,14 @@ class Trainer:
             generator.manual_seed(job.seed)
         loader_args = dict(batch_size=cfg.batch_size, num_workers=cfg.num_workers,
                            pin_memory=device.type == "cuda")
-        # A trailing batch of a single sample breaks BatchNorm layers in training mode.
-        drop_last = len(train_ds) > cfg.batch_size and len(train_ds) % cfg.batch_size == 1
-        train_loader = DataLoader(train_ds, shuffle=job.shuffle, generator=generator,
-                                  drop_last=drop_last, **loader_args)
+
+        def make_train_loader(dataset):
+            # A trailing batch of a single sample breaks BatchNorm layers in training mode.
+            drop_last = len(dataset) > cfg.batch_size and len(dataset) % cfg.batch_size == 1
+            return DataLoader(dataset, shuffle=job.shuffle, generator=generator,
+                              drop_last=drop_last, **loader_args)
+
+        train_loader = make_train_loader(train_ds)
         val_loader = DataLoader(val_ds, shuffle=False, **loader_args)
 
         if ckpt is not None:
@@ -281,9 +294,16 @@ class Trainer:
         stop_reason, last_metrics = "completed", {}
         for i in range(cfg.epochs):
             epoch = start_epoch + i + 1
+            epoch_loader = train_loader
+            if crop_fraction < 1.0:
+                rng = random.Random(f"{job.seed}:{epoch}") if job.seed is not None else random.Random()
+                epoch_ds = train_ds.epoch_dataset(crop_fraction, rng)
+                epoch_loader = make_train_loader(epoch_ds)
+                log(f"Epoch {epoch}: {len(epoch_ds) - epoch_ds.num_full} cropped samples, "
+                    f"{epoch_ds.num_full} full pictures (multi-label).")
             try:
                 self._checkpoint_pause(save_review)
-                train_loss, train_acc = self._train_epoch(model, train_loader, optimizer, criterion,
+                train_loss, train_acc = self._train_epoch(model, epoch_loader, optimizer, criterion,
                                                           device, save_review)
             except TrainingStopped:
                 stop_reason = "user"
@@ -375,16 +395,33 @@ class Trainer:
         model.train()
         total_loss, correct, seen = 0.0, 0, 0
         n_batches = len(loader)
-        for b, (images, targets) in enumerate(loader):
+        for b, batch in enumerate(loader):
             self._checkpoint_pause(save_review)
-            images, targets = images.to(device), targets.to(device)
+            images = batch[0].to(device)
             optimizer.zero_grad()
             logits = model(images)
-            loss = criterion(logits, targets)
+            if len(batch) == 3:  # MixedEpochDataset: crops (one-hot) + full pictures (multi-hot)
+                targets, is_full = batch[1].to(device), batch[2].to(device)
+                crop = ~is_full
+                loss_sum = logits.new_zeros(())
+                if crop.any():
+                    labels = targets[crop].argmax(1)
+                    loss_sum = loss_sum + nn.functional.cross_entropy(
+                        logits[crop], labels, reduction="sum")
+                    correct += (logits[crop].argmax(1) == labels).sum().item()
+                if is_full.any():
+                    loss_sum = loss_sum + nn.functional.binary_cross_entropy_with_logits(
+                        logits[is_full], targets[is_full], reduction="none").mean(1).sum()
+                    predicted = logits[is_full] > 0  # sigmoid > 0.5
+                    correct += (predicted == targets[is_full].bool()).all(1).sum().item()
+                loss = loss_sum / len(images)
+            else:
+                targets = batch[1].to(device)
+                loss = criterion(logits, targets)
+                correct += (logits.argmax(1) == targets).sum().item()
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * len(targets)
-            correct += (logits.argmax(1) == targets).sum().item()
-            seen += len(targets)
+            total_loss += loss.item() * len(images)
+            seen += len(images)
             self.cb.batch_progress(b + 1, n_batches)
         return total_loss / max(1, seen), correct / max(1, seen)
