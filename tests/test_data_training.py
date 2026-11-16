@@ -26,6 +26,16 @@ def test_multi_folder_dataset(datasets):
     assert len(train) == 9 and len(val) == 3
 
 
+def test_yolo26_classifier_trains_and_reloads(datasets, tmp_path):
+    pytest.importorskip("ultralytics")
+    summary = Trainer(_job(datasets, tmp_path / "yolo", training=TrainingConfig(
+        epochs=1, batch_size=8, image_size=32, architecture="yolo26n-cls"))).run()
+    ckpt = load_checkpoint(summary["last_checkpoint"])
+    assert ckpt["architecture"] == "yolo26n-cls"
+    model = model_from_checkpoint(ckpt).eval()
+    assert model(torch.zeros(1, 3, 32, 32)).shape == (1, 3)
+
+
 def test_augmentation_pipeline_composition():
     aug = AugmentationConfig(hflip=True, vflip=True, rotation=True, color_jitter=True,
                              affine=True, resized_crop=True)

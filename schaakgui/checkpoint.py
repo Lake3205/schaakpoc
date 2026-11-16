@@ -9,13 +9,55 @@ import torch
 from torch import nn
 from torchvision import models
 
-ARCHITECTURES = ("resnet18", "resnet34", "resnet50", "mobilenet_v3_small", "efficientnet_b0")
+TORCHVISION_ARCHITECTURES = ("resnet18", "resnet34", "resnet50", "mobilenet_v3_small",
+                             "efficientnet_b0")
+# Ultralytics YOLO26 classification models (need ultralytics>=8.4.0).
+YOLO_ARCHITECTURES = tuple(f"yolo26{size}-cls" for size in "nsmlx")
+ARCHITECTURES = TORCHVISION_ARCHITECTURES + YOLO_ARCHITECTURES
+
+
+class YoloClassifier(nn.Module):
+    """Wraps an Ultralytics ``ClassificationModel`` so it always returns logits.
+
+    The app feeds ImageNet-normalized tensors, while YOLO classifiers are trained on ``[0, 1]``
+    inputs, so the normalization is undone first.
+    """
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        from .data import IMAGENET_MEAN, IMAGENET_STD
+
+        self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.model(x * self.std + self.mean)
+        # The Classify head returns (probabilities, logits) in eval mode.
+        return out[1] if isinstance(out, (tuple, list)) else out
+
+
+def _build_yolo(architecture: str, num_classes: int, pretrained: bool) -> nn.Module:
+    from ultralytics.nn.tasks import ClassificationModel
+
+    if pretrained:
+        from ultralytics import YOLO
+
+        model = YOLO(f"{architecture}.pt").model
+        ClassificationModel.reshape_outputs(model, num_classes)
+    else:
+        model = ClassificationModel(f"{architecture}.yaml", nc=num_classes, verbose=False)
+    for p in model.parameters():
+        p.requires_grad = True
+    return YoloClassifier(model.float())
 
 
 def build_model(architecture: str, num_classes: int, pretrained: bool = False) -> nn.Module:
-    """A torchvision classifier with its head replaced for ``num_classes`` outputs."""
+    """A torchvision or YOLO26 classifier with its head replaced for ``num_classes`` outputs."""
     if architecture not in ARCHITECTURES:
         raise ValueError(f"Unknown architecture: {architecture}")
+    if architecture in YOLO_ARCHITECTURES:
+        return _build_yolo(architecture, num_classes, pretrained)
     model = getattr(models, architecture)(weights="DEFAULT" if pretrained else None)
     if architecture.startswith("resnet"):
         model.fc = nn.Linear(model.fc.in_features, num_classes)

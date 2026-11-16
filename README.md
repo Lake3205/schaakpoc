@@ -141,7 +141,8 @@ Features:
   Shuffle can be toggled and a fixed seed set. A bar chart shows the class balance of the checked pools.
 * **Augmentation** – checkboxes for horizontal/vertical flip, rotation, color jitter, affine/shear and
   random resized crop. They are composed into a `transforms.Compose` used only for the training split.
-* **Training & Quotas** – epochs, batch size, learning rate, image size, architecture; accuracy floor
+* **Training & Quotas** – epochs, batch size, learning rate, image size, architecture (torchvision
+  ResNet/MobileNet/EfficientNet or Ultralytics YOLO26 classifiers `yolo26{n,s,m,l,x}-cls`); accuracy floor
   (per epoch) and moving-average target, confidence floor (mean top-1 confidence per epoch) and moving-average
   target. Training stops (optional) once all targets are met. Full weights are exported every *N* epochs
   (`snapshots/epoch_XXXX.pt`) and early stopping halts training when the monitored metric does not improve
