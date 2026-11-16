@@ -148,9 +148,9 @@ The **Task** selector in the top bar chooses what a project trains (stored per p
   per-class results, confusion matrix; recorded in the project).
 * **🔍 Manual Review** – random labeled images with the prediction (left) next to the ground truth
   (right): green = correct box, orange = wrong class / extra box / missed object, plus the counts.
-* **🖼 Test own picture** – **1. Detector** (the project's detectors, newest or selected first, plus
-  *➕ Add detector file…*) and optional **2. Classifier** (*None* = the detector's own names, or a
-  classifier checkpoint that re-labels every box). Click or drop a picture: every object gets a
+* **🖼 Test own picture** – pick a **Detector** (the project's detectors, newest or selected first, plus
+  *➕ Add detector file…*); it finds and names every piece by itself, no classifier needed. Click or
+  drop a picture: every object gets a
   numbered box, listed on the right. The *Min. confidence* slider trades missed objects against false
   boxes. Mapping boxes to board squares (8×8 grid) is a possible later, optional feature.
 
@@ -206,8 +206,7 @@ Features:
   `correct / needed` validation samples for the accuracy floor (e.g. `9 / 8 (112%)`).
 * **Manual Review** – while paused (validation sets) or after training (test sets), shows random images with ground truth vs.
   top-3 predictions (green border = correct, red = incorrect) with Previous/Next buttons.
-* **Test own picture** – also available here; pick a project detector for the boxes and a classifier
-  checkpoint to name each box (orange = classifier and detector disagree, hover for the top-3).
+* **Test own picture** – also available here; it uses a project detector only (boxes and names).
 * **Analytics** – confusion matrix, normalized confusion matrix, instance count, precision per epoch and
   precision/recall vs. confidence threshold, updated after every validation step. The normalized confusion
   matrix shows the change against the previous run (or a baseline chosen in *Normalized matrix Δ baseline*)

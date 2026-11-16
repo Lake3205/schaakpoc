@@ -123,8 +123,6 @@ def test_full_gui_workflow(app, datasets, tmp_path, monkeypatch):
     picture_dialog = exec_calls[-1]
     assert picture_dialog.detector_combo.count() == 0
     assert "no detector yet" in picture_dialog.status.text()
-    assert picture_dialog.classifier_combo.currentData() == picture_dialog.tester.classifier_path
-    assert picture_dialog.tester.has_classifier
     picture = tmp_path / "board.png"
     Image.new("RGB", (48, 24), (245, 245, 245)).save(picture)
     assert picture_dialog.test_picture(str(picture)) is None
@@ -151,15 +149,9 @@ def test_full_gui_workflow(app, datasets, tmp_path, monkeypatch):
     result = picture_dialog.test_picture(str(picture))
     detections = result["detections"]
     assert [d["detector"][0] for d in detections] == ["White_Rook", "black-king"]  # reading order
-    assert result["classified"] and picture_dialog.pieces.count() == 2
-    same_piece = {"White_Rook": "white-rook", "black-king": "black-king"}
-    for i, d in enumerate(detections):
-        assert len(d["top3"]) == 3 and d["label"] in picture_dialog.tester.classes
-        assert d["agree"] == (d["label"] == same_piece[d["detector"][0]])
-        assert ("(detector:" in picture_dialog.pieces.item(i).text()) == (not d["agree"])
+    assert [d["label"] for d in detections] == ["White_Rook", "black-king"]  # the detector's names
+    assert picture_dialog.pieces.count() == 2
     assert result["annotated"].tobytes() != result["image"].tobytes()
-    picture_dialog.classifier_combo.setCurrentIndex(0)  # re-runs with the detector's names only
-    assert not picture_dialog.tester.has_classifier
     assert picture_dialog.pieces.item(0).text() == "1. White_Rook  90%"
     picture_dialog.conf_slider.setValue(50)
     assert picture_dialog.conf == 0.5 and picture_dialog.conf_label.text() == "50%"
@@ -271,7 +263,6 @@ def test_detection_gui_workflow(app, tmp_path, monkeypatch):
     window.open_picture_test()
     picture_dialog = dialogs[-1]
     assert picture_dialog.detector_combo.currentData() == weights
-    assert not picture_dialog.tester.has_classifier
     assert picture_dialog.test_picture(str(next((train / "images").iterdir()))) is not None
 
     window.use_selected_for_resume()

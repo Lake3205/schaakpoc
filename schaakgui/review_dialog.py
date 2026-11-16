@@ -1,5 +1,5 @@
 """Modal dialogs for manually checking predictions: random validation/test images (Manual Review)
-and pictures chosen by the user (Test own picture: YOLO detector boxes + classifier labels)."""
+and pictures chosen by the user (Test own picture: the YOLO detector boxes and names every piece)."""
 from __future__ import annotations
 
 import html
@@ -29,15 +29,13 @@ from PyQt6.QtWidgets import (
 )
 
 from .checkpoint import load_checkpoint, model_from_checkpoint
-from .data import MultiFolderImageDataset, build_eval_transform, crop_box, resolve_placeholder_classes
+from .data import MultiFolderImageDataset, build_eval_transform, resolve_placeholder_classes
 from .detector import (
     AGREE_RGB,
-    DISAGREE_RGB,
     DetectionReviewSession,
     draw_detections,
     load_picture,
     load_yolo_detector,
-    same_class,
 )
 
 PICTURE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff);;All files (*)"
@@ -65,35 +63,13 @@ def to_pixmap(image: Image.Image, size: int = 400) -> QPixmap:
 
 
 class ImageTester:
-    """Two-stage picture test (Qt independent): a YOLO detector boxes every piece, then the app's
-    classifier checkpoint (optional) labels each box crop - the same kind of crop it was trained on."""
+    """Picture test (Qt independent): a YOLO detector boxes and names every piece by itself."""
 
-    def __init__(self, checkpoint_path: Optional[str] = None, folders: Optional[list[str]] = None,
-                 detector_path: Optional[str | Path] = None):
-        self.folders = list(folders or [])
-        self.classes: list[str] = []
-        self.model = None
-        self.classifier_path: Optional[str] = None
-        self.load_classifier(checkpoint_path)
+    def __init__(self, detector_path: Optional[str | Path] = None):
         self.detector = None
         self.detector_path: Optional[str] = None
         if detector_path:
             self.load_detector(detector_path)
-
-    @property
-    def has_classifier(self) -> bool:
-        return self.model is not None
-
-    def load_classifier(self, path: Optional[str]):
-        """Load a classifier checkpoint, or ``None`` to use the detector's own labels."""
-        if not path:
-            self.model, self.classes, self.classifier_path = None, [], None
-            return
-        ckpt = load_checkpoint(path)
-        self.classes = resolve_placeholder_classes(ckpt["classes"], self.folders)
-        self.model = model_from_checkpoint(ckpt).eval()
-        self.transform = build_eval_transform(int(ckpt["image_size"]))
-        self.classifier_path = str(path)
 
     def load_detector(self, path: str | Path):
         self.detector = load_yolo_detector(path)
@@ -106,26 +82,15 @@ class ImageTester:
         return [{"box": tuple(float(v) for v in xyxy), "detector": (result.names[int(c)], float(p))}
                 for xyxy, p, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist())]
 
-    def predict_file(self, path: str | Path, conf: float = 0.25, use_classifier: bool = True) -> dict:
+    def predict_file(self, path: str | Path, conf: float = 0.25) -> dict:
         if self.detector is None:
             raise ValueError("No YOLO detector loaded: train or import a project detector first.")
         image = load_picture(path)
-        use_classifier = use_classifier and self.has_classifier
         detections = sorted(self.detect(image, conf), key=lambda d: (d["box"][1], d["box"][0]))
-        w, h = image.size
         for d in detections:
-            if use_classifier:
-                x1, y1, x2, y2 = d["box"]
-                crop = crop_box(image, (x1 / w, y1 / h, x2 / w, y2 / h))
-                d["top3"] = top_predictions(self.model, self.transform, self.classes, crop)
-                d["label"], d["conf"] = d["top3"][0]
-                d["agree"] = same_class(d["label"], d["detector"][0])
-            else:
-                d["top3"] = None
-                d["label"], d["conf"] = d["detector"]
-                d["agree"] = True
+            d["label"], d["conf"] = d["detector"]
         return {"path": str(path), "image": image, "detections": detections,
-                "annotated": draw_detections(image, detections), "classified": use_classifier}
+                "annotated": draw_detections(image, detections)}
 
 
 class ReviewSession:
@@ -321,10 +286,9 @@ class PictureArea(QLabel):
 
 
 class ImageTestDialog(QDialog):
-    """Find every piece in your own picture: the detector draws the boxes, the classifier names them."""
+    """Find every piece in your own picture: the detector draws the boxes and names them."""
 
     def __init__(self, tester: ImageTester, parent=None, detectors: Sequence[str] = (),
-                 classifiers: Sequence[str] = (),
                  import_detector: Optional[Callable[[str], str]] = None):
         super().__init__(parent)
         self.tester = tester
@@ -345,24 +309,14 @@ class ImageTestDialog(QDialog):
                               "project. Classifier checkpoints of this app cannot draw boxes.")
         add_button.clicked.connect(self.choose_import)
         add_button.setEnabled(import_detector is not None)
-        self.classifier_combo = QComboBox()
-        self.classifier_combo.addItem("None – use the detector's own names", None)
-        for path in classifiers:
-            self.classifier_combo.addItem(model_label(path), path)
-        index = self.classifier_combo.findData(tester.classifier_path)
-        self.classifier_combo.setCurrentIndex(max(0, index))
-        self.classifier_combo.currentIndexChanged.connect(self.on_classifier_changed)
-        for combo in (self.detector_combo, self.classifier_combo):
-            combo.setMinimumWidth(420)
+        self.detector_combo.setMinimumWidth(420)
         self.status = QLabel()
         self.status.setWordWrap(True)
 
         steps = QGridLayout()
-        steps.addWidget(QLabel("<b>1. Detector</b> – finds the pieces"), 0, 0)
+        steps.addWidget(QLabel("<b>Detector</b> – finds and names the pieces"), 0, 0)
         steps.addWidget(self.detector_combo, 0, 1)
         steps.addWidget(add_button, 0, 2)
-        steps.addWidget(QLabel("<b>2. Classifier</b> – names each piece"), 1, 0)
-        steps.addWidget(self.classifier_combo, 1, 1)
         steps.setColumnStretch(1, 1)
 
         self.image = PictureArea("📷  Click here or drop a picture to test it",
@@ -377,15 +331,10 @@ class ImageTestDialog(QDialog):
         self.pieces.setMinimumWidth(330)
         self.pieces.setWordWrap(True)
         self.pieces.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        legend = QLabel("<small>Hover a piece for the classifier's top-3. "
-                        "<span style='color:#2e7d32'>■</span> detector and classifier agree, "
-                        "<span style='color:#e65100'>■</span> they disagree.</small>")
-        legend.setWordWrap(True)
         side = QVBoxLayout()
         side.addWidget(QLabel("<b>Pieces found</b>"))
         side.addWidget(self.summary)
         side.addWidget(self.pieces, 1)
-        side.addWidget(legend)
         body = QHBoxLayout()
         body.addWidget(self.image, 1)
         body.addLayout(side)
@@ -464,15 +413,6 @@ class ImageTestDialog(QDialog):
         self.refresh()
         return True
 
-    def on_classifier_changed(self, *_):
-        try:
-            self._busy(self.tester.load_classifier, self.classifier_combo.currentData())
-        except Exception as e:
-            QMessageBox.warning(self, "Test own picture", f"Cannot load the classifier:\n{e}")
-            self.classifier_combo.setCurrentIndex(0)
-            return
-        self.refresh()
-
     def on_conf_changed(self, value: int):
         self.conf_label.setText(f"{value}%")
         if not self.conf_slider.isSliderDown():
@@ -530,24 +470,13 @@ class ImageTestDialog(QDialog):
         detections = result["detections"]
         self.image.setPixmap(to_pixmap(result["annotated"], 800))
         self.image.setStyleSheet("")
-        disagree = sum(not d["agree"] for d in detections)
         text = f"<b>{len(detections)}</b> found in <small>{html.escape(Path(path).name)}</small>"
-        if result["classified"] and disagree:
-            text += f"<br><span style='color:#e65100'>{disagree} disagreement(s)</span>"
         if not detections:
             text += "<br><small>Nothing found – move the confidence slider to the left.</small>"
         self.summary.setText(text)
         self.pieces.clear()
         for n, d in enumerate(detections, 1):
-            det_name, det_conf = d["detector"]
-            line = f"{n}. {d['label']}  {d['conf'] * 100:.0f}%"
-            if result["classified"] and not d["agree"]:
-                line += f"   (detector: {det_name} {det_conf * 100:.0f}%)"
-            item = QListWidgetItem(line)
-            if d["top3"]:
-                item.setToolTip("Classifier top-3:\n" + "\n".join(
-                    f"{rank}. {name}: {c * 100:.1f}%" for rank, (name, c) in enumerate(d["top3"], 1))
-                    + f"\nDetector: {det_name} {det_conf * 100:.1f}%")
-            item.setForeground(QBrush(QColor(*(AGREE_RGB if d["agree"] else DISAGREE_RGB))))
+            item = QListWidgetItem(f"{n}. {d['label']}  {d['conf'] * 100:.0f}%")
+            item.setForeground(QBrush(QColor(*AGREE_RGB)))
             self.pieces.addItem(item)
         return result

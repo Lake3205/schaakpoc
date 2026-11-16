@@ -1291,35 +1291,15 @@ class MainWindow(QMainWindow):
         ReviewDialog(session, checkpoint, self, source).exec()
 
     def open_picture_test(self):
-        """Box every object in a user picture with a project detector; optionally a classifier
-        checkpoint re-labels each box (two-stage)."""
+        """Box and name every object in a user picture with a project detector."""
         if self.project is None:
             return
         self._collect_form(self.project)
-        p = self.project
-        classifiers = sorted(self.manager.list_checkpoints(p), key=lambda c: Path(c).stat().st_mtime,
-                             reverse=True)
         detectors = self.project_detectors()
-        if self.task == "detect":
-            preferred = self.review_checkpoint()
-            if preferred:
-                detectors = [preferred] + [d for d in detectors if d != preferred]
-            checkpoint = None  # the detector's own names; a classifier can still be chosen
-        else:
-            checkpoint = self.review_checkpoint() or (classifiers[0] if classifiers else None)
-            if checkpoint and checkpoint not in classifiers:
-                classifiers.insert(0, checkpoint)
-        # Only used to give class_N placeholders their yaml names.
-        folders = p.checked_train_folders() + p.checked_val_folders() + p.checked_test_folders()
-        tester = ImageTester(folders=folders)
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            tester.load_classifier(checkpoint)
-        except Exception as e:
-            self.log(f"Test own picture: cannot load classifier {checkpoint}: {e}")
-        finally:
-            QApplication.restoreOverrideCursor()
-        ImageTestDialog(tester, self, detectors, classifiers, self.import_project_detector).exec()
+        preferred = self.review_checkpoint() if self.task == "detect" else None
+        if preferred:
+            detectors = [preferred] + [d for d in detectors if d != preferred]
+        ImageTestDialog(ImageTester(), self, detectors, self.import_project_detector).exec()
 
     # --------------------------------------------------------------- detector
     def project_detectors(self) -> list[str]:
