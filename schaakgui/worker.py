@@ -1,6 +1,7 @@
 """QThread worker wrapping :class:`schaakgui.engine.Trainer` (Worker-Signal-Slot pattern)."""
 from __future__ import annotations
 
+import threading
 import traceback
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
@@ -95,6 +96,44 @@ class DetectorWorker(QObject):
 
 def start_detector_worker(job: DetectorJob) -> tuple[QThread, DetectorWorker]:
     return _start(DetectorWorker(job))
+
+
+class CallWorker(QObject):
+    """Runs one function off the GUI thread (piece detection, dataset generation, imports).
+
+    With ``with_progress`` the function also gets ``progress=(i, total) -> None`` and
+    ``stop=() -> bool`` keyword arguments (stop is set by :meth:`request_stop`)."""
+
+    progress = pyqtSignal(int, int)
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, func, *args, with_progress: bool = False, **kwargs):
+        super().__init__()
+        self.func, self.args, self.kwargs = func, args, kwargs
+        self.with_progress = with_progress
+        self._stop = threading.Event()
+
+    @pyqtSlot()
+    def run(self):
+        kwargs = dict(self.kwargs)
+        if self.with_progress:
+            kwargs.update(progress=self.progress.emit, stop=self._stop.is_set)
+        try:
+            result = self.func(*self.args, **kwargs)
+        except Exception as e:  # report every failure to the UI instead of killing the thread
+            traceback.print_exc()
+            self.failed.emit(str(e) or type(e).__name__)
+        else:
+            self.finished.emit(result)
+
+    def request_stop(self):
+        self._stop.set()
+
+
+def start_call(func, *args, with_progress: bool = False, **kwargs) -> tuple[QThread, CallWorker]:
+    """``func(*args, **kwargs)`` in a new QThread. Connect signals, then call ``thread.start()``."""
+    return _start(CallWorker(func, *args, with_progress=with_progress, **kwargs))
 
 
 def _start(worker):

@@ -30,9 +30,10 @@ from PyQt6.QtWidgets import (
 
 from .checkpoint import load_checkpoint, model_from_checkpoint
 from .data import MultiFolderImageDataset, build_eval_transform, resolve_placeholder_classes
-from .detector import (
+from .detector import (  # noqa: F401 - ImageTester is re-exported for older imports
     AGREE_RGB,
     DetectionReviewSession,
+    ImageTester,
     draw_detections,
     load_picture,
     load_yolo_detector,
@@ -60,37 +61,6 @@ def to_pixmap(image: Image.Image, size: int = 400) -> QPixmap:
         pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation)
     return pixmap
-
-
-class ImageTester:
-    """Picture test (Qt independent): a YOLO detector boxes and names every piece by itself."""
-
-    def __init__(self, detector_path: Optional[str | Path] = None):
-        self.detector = None
-        self.detector_path: Optional[str] = None
-        if detector_path:
-            self.load_detector(detector_path)
-
-    def load_detector(self, path: str | Path):
-        self.detector = load_yolo_detector(path)
-        self.detector_path = str(path)
-
-    def detect(self, image: Image.Image, conf: float) -> list[dict]:
-        device = 0 if torch.cuda.is_available() else "cpu"
-        result = self.detector(image, conf=conf, device=device, verbose=False)[0]
-        boxes = result.boxes
-        return [{"box": tuple(float(v) for v in xyxy), "detector": (result.names[int(c)], float(p))}
-                for xyxy, p, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist())]
-
-    def predict_file(self, path: str | Path, conf: float = 0.25) -> dict:
-        if self.detector is None:
-            raise ValueError("No YOLO detector loaded: train or import a project detector first.")
-        image = load_picture(path)
-        detections = sorted(self.detect(image, conf), key=lambda d: (d["box"][1], d["box"][0]))
-        for d in detections:
-            d["label"], d["conf"] = d["detector"]
-        return {"path": str(path), "image": image, "detections": detections,
-                "annotated": draw_detections(image, detections)}
 
 
 class ReviewSession:

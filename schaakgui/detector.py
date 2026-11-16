@@ -3,6 +3,7 @@
 Detectors live in ``<project>/checkpoints/detectors/``: in-app trainings in
 ``detector_<stamp>/weights/best.pt`` (with ``schaakgui_run.json`` provenance) and imported weights as
 ``<name>.pt``. They are kept apart from the classifier checkpoints (a different checkpoint format).
+Board corner models (YOLO-pose, task ``board``) live the same way in ``checkpoints/boards/``.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ import yaml
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .checkpoint import load_checkpoint
-from .data import is_image, read_yolo_labels, yolo_class_names, yolo_dirs
+from .data import is_image, read_yolo_labels, split_yaml, yolo_class_names, yolo_dirs, yolo_kpt_shape
 from .projects import AugmentationConfig, DetectorConfig
 
 DETECTOR_BASE_MODELS = tuple(f"{family}{size}.pt" for family in ("yolo26", "yolo11")
@@ -30,6 +31,11 @@ DETECTOR_BASE_MODELS = tuple(f"{family}{size}.pt" for family in ("yolo26", "yolo
 RUN_INFO = "schaakgui_run.json"
 METRIC_KEYS = {"precision": "metrics/precision(B)", "recall": "metrics/recall(B)",
                "mAP50": "metrics/mAP50(B)", "mAP50_95": "metrics/mAP50-95(B)"}
+POSE_METRIC_KEYS = {"precision": "metrics/precision(P)", "recall": "metrics/recall(P)",
+                    "mAP50": "metrics/mAP50(P)", "mAP50_95": "metrics/mAP50-95(P)"}
+# Project task -> Ultralytics task and checkpoint folder.
+YOLO_TASKS = {"detect": "detect", "board": "pose"}
+MODEL_DIRS = {"detect": "detectors", "board": "boards"}
 AGREE_RGB = (46, 125, 50)
 DISAGREE_RGB = (230, 81, 0)
 TRUTH_RGB = (21, 101, 192)
@@ -71,13 +77,18 @@ def draw_detections(image: Image.Image, detections: list[dict]) -> Image.Image:
     return out
 
 
+def models_dir(project_dir: str | Path, task: str = "detect") -> Path:
+    """``checkpoints/detectors`` (task ``detect``) or ``checkpoints/boards`` (task ``board``)."""
+    return Path(project_dir) / "checkpoints" / MODEL_DIRS.get(task, "detectors")
+
+
 def detectors_dir(project_dir: str | Path) -> Path:
-    return Path(project_dir) / "checkpoints" / "detectors"
+    return models_dir(project_dir, "detect")
 
 
-def list_detectors(project_dir: str | Path) -> list[str]:
-    """Detector weights of a project, newest first (``best.pt`` of trainings + imported files)."""
-    root = detectors_dir(project_dir)
+def list_models(project_dir: str | Path, task: str = "detect") -> list[str]:
+    """YOLO weights of a project for a task, newest first (``best.pt`` of trainings + imports)."""
+    root = models_dir(project_dir, task)
     if not root.is_dir():
         return []
     found = [p for p in root.glob("*/weights/best.pt")] + [p for p in root.glob("*.pt")]
@@ -85,11 +96,25 @@ def list_detectors(project_dir: str | Path) -> list[str]:
     return [str(p.resolve()) for p in found]
 
 
+def list_detectors(project_dir: str | Path) -> list[str]:
+    """Detector weights of a project, newest first (``best.pt`` of trainings + imported files)."""
+    return list_models(project_dir, "detect")
+
+
 def load_yolo_detector(path: str | Path):
     """Load YOLO detector weights; clear errors for classifier checkpoints and non-detect models."""
+    return load_yolo_model(path, "detect")
+
+
+def load_yolo_model(path: str | Path, task: str | Sequence[str] = "detect"):
+    """Load YOLO weights of an Ultralytics task (``detect``, ``pose`` or several allowed tasks).
+
+    Clear errors for classifier checkpoints of this app and models of another task."""
+    allowed = (task,) if isinstance(task, str) else tuple(task)
     path = Path(path)
+    kind = "Board model" if allowed == ("pose",) else "Detector"
     if not path.is_file():
-        raise FileNotFoundError(f"Detector not found: {path}")
+        raise FileNotFoundError(f"{kind} not found: {path}")
     try:
         load_checkpoint(path)
     except Exception:
@@ -103,19 +128,31 @@ def load_yolo_detector(path: str | Path):
         detector = YOLO(str(path))
     except Exception as e:
         raise ValueError(f"{path.name} is not a YOLO model ({e})") from e
-    if detector.task != "detect":
-        raise ValueError(f"{path.name} is a YOLO '{detector.task}' model, not a detector")
+    if detector.task not in allowed:
+        wanted = "board corner (pose)" if allowed == ("pose",) else "detector"
+        raise ValueError(f"{path.name} is a YOLO '{detector.task}' model, not a {wanted} model")
     return detector
 
 
 def import_detector(project_dir: str | Path, source: str | Path) -> str:
     """Validate detector weights and copy them into the project; returns the project path."""
+    return import_model(project_dir, source, "detect")
+
+
+def _load_for_task(path: str | Path, task: str):
+    if task == "board":
+        return load_yolo_model(path, "pose")
+    return load_yolo_detector(path)
+
+
+def import_model(project_dir: str | Path, source: str | Path, task: str = "detect") -> str:
+    """Validate YOLO weights for a project task and copy them into the project; returns the path."""
     source = Path(source).resolve()
-    root = detectors_dir(project_dir).resolve()
+    root = models_dir(project_dir, task).resolve()
     if source.is_relative_to(root):
-        load_yolo_detector(source)
+        _load_for_task(source, task)
         return str(source)
-    load_yolo_detector(source)
+    _load_for_task(source, task)
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = source.stem if source.parent.name != "weights" else f"{source.parent.parent.name}_{source.stem}"
@@ -130,12 +167,13 @@ def _split_names(images_dir: Path) -> dict[int, str]:
 
 
 def build_data_yaml(train_folders: Sequence[str], val_folders: Sequence[str],
-                    out_path: str | Path) -> dict:
+                    out_path: str | Path, task: str = "detect") -> dict:
     """Write an Ultralytics dataset yaml for the YOLO splits among the folders.
 
     ImageFolder datasets have no boxes and are skipped. All splits must share the same class
     names (use *Synchronize YAML class names* first). Without YOLO validation folders the
-    training splits are also used for validation. Returns the written config.
+    training splits are also used for validation. Returns the written config. For task ``board``
+    (pose) all splits must also share ``kpt_shape``, which is copied with ``flip_idx``.
     """
     train = [d[0] for d in (yolo_dirs(f) for f in train_folders) if d]
     val = [d[0] for d in (yolo_dirs(f) for f in val_folders) if d]
@@ -157,12 +195,39 @@ def build_data_yaml(train_folders: Sequence[str], val_folders: Sequence[str],
         "val": [str(p.resolve()) for p in (val or train)],
         "names": {i: names.get(i, f"class_{i}") for i in range(max(names) + 1)},
     }
+    if task == "board":
+        config.update(_pose_config(train + val))
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return config
 
 
+
+
+def _pose_config(images_dirs: Sequence[Path]) -> dict:
+    """``kpt_shape``/``flip_idx`` shared by all pose splits (error when missing or different)."""
+    shape, flip = None, None
+    for images in images_dirs:
+        split_shape = yolo_kpt_shape(images.parent)
+        if split_shape is None:
+            raise ValueError(f"{images.parent} has no kpt_shape in its .yaml: it is not a "
+                             "board-corner (pose) dataset.")
+        if shape is not None and split_shape != shape:
+            raise ValueError(f"The pose folders use different kpt_shape values: {shape} and "
+                             f"{split_shape} ({images.parent})")
+        shape = split_shape
+        if flip is None:
+            path = split_yaml(images.parent)
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) if path else None
+            if isinstance(data, dict) and data.get("flip_idx") is not None:
+                flip = [int(v) for v in data["flip_idx"]]
+    config: dict = {"kpt_shape": shape}
+    if flip is not None:
+        if len(flip) != shape[0]:
+            raise ValueError(f"flip_idx {flip} does not match kpt_shape {shape}")
+        config["flip_idx"] = flip
+    return config
 
 
 def ultralytics_augmentation(aug: AugmentationConfig, mosaic: bool = True) -> dict:
@@ -189,6 +254,16 @@ def ultralytics_augmentation(aug: AugmentationConfig, mosaic: bool = True) -> di
 def detection_metrics(raw: Optional[dict]) -> dict:
     raw = raw or {}
     return {key: float(raw.get(name, 0.0)) for key, name in METRIC_KEYS.items()}
+
+
+def pose_metrics(raw: Optional[dict]) -> dict:
+    """Keypoint metrics (mAP50(P), mAP50-95(P), …) of a pose training/validation."""
+    raw = raw or {}
+    return {key: float(raw.get(name, 0.0)) for key, name in POSE_METRIC_KEYS.items()}
+
+
+def task_metrics(raw: Optional[dict], task: str) -> dict:
+    return pose_metrics(raw) if task == "board" else detection_metrics(raw)
 
 
 def confusion_payload(matrix, names: dict) -> tuple[list[list[int]], list[str]]:
@@ -243,10 +318,12 @@ class DetectorJob:
     seed: Optional[int] = None
     device: Optional[str | int] = None  # None = GPU 0 when available, else CPU
     plots: bool = True  # also needed for the live confusion matrix
+    task: str = "detect"  # "detect" (pieces) or "board" (YOLO-pose corner model)
 
 
 class DetectorTrainer:
-    """Trains an Ultralytics YOLO detector into ``<project>/checkpoints/detectors/detector_<stamp>``.
+    """Trains an Ultralytics YOLO detector into ``<project>/checkpoints/detectors/detector_<stamp>``
+    (or a board corner pose model into ``checkpoints/boards/board_<stamp>``).
 
     Supports stop (after the current batch) and pause/resume between batches; while paused the
     current weights are saved as ``weights/paused.pt`` for Manual Review."""
@@ -298,11 +375,12 @@ class DetectorTrainer:
         if cfg.resume_from and not Path(cfg.resume_from).is_file():
             raise FileNotFoundError(f"Detector to continue from not found: {cfg.resume_from}")
         base = cfg.resume_from or cfg.base_model
+        task = self.job.task
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        root = detectors_dir(self.job.project_dir).resolve()
-        name = f"detector_{stamp}"
+        root = models_dir(self.job.project_dir, task).resolve()
+        name = f"board_{stamp}" if task == "board" else f"detector_{stamp}"
         data = build_data_yaml(self.job.train_folders, self.job.val_folders,
-                               root / name / "data.yaml")
+                               root / name / "data.yaml", task)
         if data["val"] == data["train"]:
             self.log("No YOLO validation folders checked: validating on the training folders.")
         skipped = [f for f in [*self.job.train_folders, *self.job.val_folders] if yolo_dirs(f) is None]
@@ -315,7 +393,14 @@ class DetectorTrainer:
         if device is None:
             device = 0 if torch.cuda.is_available() else "cpu"
 
-        model = load_yolo_detector(base) if cfg.resume_from else YOLO(base)
+        wanted = YOLO_TASKS.get(task, "detect")
+        if cfg.resume_from:
+            model = load_yolo_model(base, wanted)
+        else:
+            model = YOLO(base)
+            if model.task != wanted:
+                raise ValueError(f"Base model {base} is a YOLO '{model.task}' model; this task needs a "
+                                 f"'{wanted}' model (e.g. {'yolo26s-pose.pt' if wanted == 'pose' else 'yolo26m.pt'}).")
         history: list[dict] = []
         batch = {"i": 0}
 
@@ -330,7 +415,7 @@ class DetectorTrainer:
             batch["i"] = 0
             if trainer.epoch >= trainer.epochs:  # also fired for the final validation of best.pt
                 return
-            metrics = detection_metrics(trainer.metrics)
+            metrics = task_metrics(trainer.metrics, task)
             history.append({"epoch": trainer.epoch + 1, **metrics})
             self.epoch_progress(trainer.epoch + 1, trainer.epochs)
             payload = {"history": list(history), "metrics": metrics, "curves": {}}
@@ -354,7 +439,8 @@ class DetectorTrainer:
                     batch=cfg.batch_size, device=device, workers=cfg.num_workers,
                     patience=cfg.patience, save_period=cfg.snapshot_every or -1, seed=seed,
                     deterministic=self.job.seed is not None, project=str(root), name=name,
-                    exist_ok=True, plots=self.job.plots, verbose=False, **augmentation)
+                    exist_ok=True, plots=self.job.plots, verbose=False,
+                    freeze=cfg.freeze or None, **augmentation)
 
         trainer = model.trainer
         weights = root / name / "weights"
@@ -366,7 +452,7 @@ class DetectorTrainer:
             reason = "early_stopping"
         else:
             reason = "completed"
-        final = detection_metrics(getattr(trainer, "metrics", None)) if history else {}
+        final = task_metrics(getattr(trainer, "metrics", None), task) if history else {}
         summary = {
             "weights": str(best.resolve()) if best.is_file() else None,
             "output_dir": str(root / name),
@@ -383,6 +469,7 @@ class DetectorTrainer:
             "augmentation": augmentation,
             "config": asdict(cfg),
             "seed": seed,
+            "task": task,
         }
         (root / name / RUN_INFO).write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return summary
@@ -391,14 +478,19 @@ class DetectorTrainer:
 def evaluate_detector(weights: str | Path, folders: Sequence[str], image_size: int = 640,
                       batch_size: int = 16, device: Optional[str | int] = None,
                       plots: bool = True) -> dict:
-    """Final exam: Ultralytics validation of a detector on (test) YOLO folders."""
+    """Final exam: Ultralytics validation of a detector (or board pose model) on (test) YOLO folders.
+
+    For a pose model the keypoint metrics are reported and the corner error (% of the board
+    diagonal) is added."""
     import torch
 
-    model = load_yolo_detector(weights)
+    model = load_yolo_model(weights, ("detect", "pose"))
+    pose = model.task == "pose"
     if device is None:
         device = 0 if torch.cuda.is_available() else "cpu"
     with tempfile.TemporaryDirectory() as tmp:
-        config = build_data_yaml(folders, folders, Path(tmp) / "data.yaml")
+        config = build_data_yaml(folders, folders, Path(tmp) / "data.yaml",
+                                 "board" if pose else "detect")
         model_names = [str(model.names[i]) for i in range(len(model.names))]
         if list(config["names"].values()) != model_names:
             raise ValueError("The test folders' classes differ from the detector's classes.\n"
@@ -406,18 +498,24 @@ def evaluate_detector(weights: str | Path, folders: Sequence[str], image_size: i
         metrics = model.val(data=str(Path(tmp) / "data.yaml"), split="val", imgsz=image_size,
                             batch=batch_size, device=device, workers=0, plots=plots,
                             project=tmp, name="exam", exist_ok=True, verbose=False)
-    box = metrics.box
+    box = metrics.pose if pose else metrics.box
     per_class = []
     for i, cls in enumerate(box.ap_class_index):
         p, r, ap50, ap = box.class_result(i)
         per_class.append({"class": model_names[int(cls)], "precision": float(p), "recall": float(r),
                           "mAP50": float(ap50), "mAP50_95": float(ap)})
     confusion, classes = confusion_payload(metrics.confusion_matrix.matrix, dict(enumerate(model_names)))
-    return {"weights": str(weights), "test_folders": list(folders),
-            "images": len(yolo_images(folders)), "precision": float(box.mp),
-            "recall": float(box.mr), "mAP50": float(box.map50), "mAP50_95": float(box.map),
-            "per_class": per_class, "confusion": confusion, "classes": classes,
-            "curves": confidence_curves(box)}
+    result = {"weights": str(weights), "test_folders": list(folders),
+              "images": len(yolo_images(folders)), "precision": float(box.mp),
+              "recall": float(box.mr), "mAP50": float(box.map50), "mAP50_95": float(box.map),
+              "per_class": per_class, "confusion": confusion, "classes": classes,
+              "curves": confidence_curves(box)}
+    if pose:
+        from .scan_eval import board_corner_errors, summarize_corner_errors
+
+        result.update(summarize_corner_errors(board_corner_errors(model, folders, device=device)))
+        result["task"] = "board"
+    return result
 
 
 def yolo_images(folders: Sequence[str]) -> list[tuple[str, str, dict[int, str]]]:
@@ -473,11 +571,14 @@ def match_boxes(predictions: list[dict], truths: list[dict], iou: float = 0.5) -
 
 
 class DetectionReviewSession:
-    """Detector + labeled YOLO images + random history: predicted boxes vs. ground truth."""
+    """Detector + labeled YOLO images + random history: predicted boxes vs. ground truth.
+
+    Board corner (pose) models also return the predicted and true corners."""
 
     def __init__(self, weights: str, folders: Sequence[str], seed: Optional[int] = None,
                  conf: float = 0.25):
-        self.detector = load_yolo_detector(weights)
+        self.detector = load_yolo_model(weights, ("detect", "pose"))
+        self.pose = self.detector.task == "pose"
         self.samples = yolo_images(folders)
         if not self.samples:
             raise ValueError("The selected folders contain no YOLO images (images/ + labels/).")
@@ -499,16 +600,28 @@ class DetectionReviewSession:
                         "conf": float(p)}
                        for xyxy, p, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist(),
                                              boxes.cls.tolist())]
+        kpt_shape = yolo_kpt_shape(Path(label_file).parent.parent) if self.pose else None
         truths = [{"box": (x1 * w, y1 * h, x2 * w, y2 * h), "label": names.get(c, f"class_{c}")}
-                  for c, (x1, y1, x2, y2) in read_yolo_labels(label_file)]
+                  for c, (x1, y1, x2, y2) in read_yolo_labels(label_file, kpt_shape or
+                                                              ([4, 3] if self.pose else None))]
         counts = match_boxes(predictions, truths)
         for p in predictions:
             p["agree"] = p["status"] == "correct"
         for t in truths:
             t["color"] = TRUTH_RGB if t["status"] == "found" else DISAGREE_RGB
-        return {"path": path, "image": image, "predictions": predictions, "truths": truths,
-                "counts": counts, "pred_image": draw_detections(image, predictions),
-                "truth_image": draw_detections(image, truths)}
+        out = {"path": path, "image": image, "predictions": predictions, "truths": truths,
+               "counts": counts, "pred_image": draw_detections(image, predictions),
+               "truth_image": draw_detections(image, truths)}
+        if self.pose:
+            from .keypoints import read_board_label
+            from .scan_eval import best_corners, corner_error
+
+            pred_corners = best_corners(result)
+            truth_corners = read_board_label(label_file, w, h)
+            out.update({"pred_corners": pred_corners, "truth_corners": truth_corners,
+                        "corner_error": corner_error(pred_corners, truth_corners)
+                        if pred_corners and truth_corners else None})
+        return out
 
     def next(self) -> dict:
         if self.position + 1 < len(self.history):
@@ -523,3 +636,36 @@ class DetectionReviewSession:
             return None
         self.position -= 1
         return self.predict(self.history[self.position])
+
+
+class ImageTester:
+    """Picture test (Qt independent): a YOLO detector boxes and names every piece by itself."""
+
+    def __init__(self, detector_path: Optional[str | Path] = None):
+        self.detector = None
+        self.detector_path: Optional[str] = None
+        if detector_path:
+            self.load_detector(detector_path)
+
+    def load_detector(self, path: str | Path):
+        self.detector = load_yolo_detector(path)
+        self.detector_path = str(path)
+
+    def detect(self, image: Image.Image, conf: float) -> list[dict]:
+        import torch
+
+        device = 0 if torch.cuda.is_available() else "cpu"
+        result = self.detector(image, conf=conf, device=device, verbose=False)[0]
+        boxes = result.boxes
+        return [{"box": tuple(float(v) for v in xyxy), "detector": (result.names[int(c)], float(p))}
+                for xyxy, p, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist())]
+
+    def predict_file(self, path: str | Path, conf: float = 0.25) -> dict:
+        if self.detector is None:
+            raise ValueError("No YOLO detector loaded: train or import a project detector first.")
+        image = load_picture(path)
+        detections = sorted(self.detect(image, conf), key=lambda d: (d["box"][1], d["box"][0]))
+        for d in detections:
+            d["label"], d["conf"] = d["detector"]
+        return {"path": str(path), "image": image, "detections": detections,
+                "annotated": draw_detections(image, detections)}
