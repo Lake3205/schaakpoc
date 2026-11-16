@@ -10,6 +10,8 @@ and **YOLO** (Ultralytics) for detection, running on an NVIDIA RTX 5070 GPU.
 | `train.py` | Train a chess-piece detector on your GPU |
 | `detect.py` | Detect pieces from a webcam, image or video |
 | `detect_test.py` | Evaluate the trained model on the labeled test set |
+| `fen.py` | Track a game (one image per move) and export annotated images + FEN (see section 5b) |
+| `schaakfen/` | Detection → board calibration → legal-move tracking → rendering → FEN export |
 | `chess.yaml` | Dataset config (12 classes: white/black king, queen, rook, bishop, knight, pawn) |
 | `app.py` | **v2** desktop GUI (PyQt6) to train chess-piece *image classifiers* (see section 6) |
 | `schaakgui/` | Code of the v2 GUI: projects, datasets, augmentations, quotas, checkpoints, training thread |
@@ -64,6 +66,13 @@ python train.py --model my_weights.pt      # any other base model (overrides --y
 
 YOLO26 needs `ultralytics>=8.4.0` (`pip install -U ultralytics`).
 
+Training enables perspective, rotation and scale augmentation by default
+(`--perspective 0.0005 --degrees 180 --scale 0.5`) so the detector generalizes to steep, oblique
+and rotated camera angles; vertical flips stay off and class ids are never changed. Pick any dataset
+split or merged set with `--data my_data.yaml` and store each run in its own folder with
+`--project runs --name my_run` (best weights in `weights/best.pt`, metrics in `results.csv`,
+run config in `args.yaml`).
+
 `workers=0` avoids Windows multiprocessing memory errors. You can increase it
 with `--workers 2` if your system has enough memory.
 
@@ -102,6 +111,33 @@ To check the model yourself, open 10 random test images with boxes drawn
 python detect_test.py --show
 python detect_test.py --show --num 20 --show-conf 0.3 --seed 42
 ```
+
+## 5b. Board state and FEN per move
+
+`fen.py` turns piece detections into a tracked game. Place the camera anywhere (any angle or
+rotation), keep it still, and capture one image after every move. The first image must show the
+starting position.
+
+```bash
+python fen.py --source game_frames/              # folder with one image per move (natural sort)
+python fen.py --source 0                         # webcam: space = capture after a move, q = quit
+python fen.py --source frames/ --out runs/fen/game1 --ext .png
+```
+
+For every frame `runs/fen/game/move_<num>.jpg` is written and the FEN is appended to
+`runs/fen/game/moves.fen` (and printed). Pipeline (`schaakfen/`):
+
+1. **Base points** – each piece is placed at `x = (x1 + x2) / 2`, `y = y2 - 0.15 * (y2 - y1)`
+   (not the box center, so tall pieces are not assigned to the square behind them).
+2. **Frame-0 calibration** – the 32 start pieces are matched to their squares and the homography `H`
+   (image → canonical 800×800 board) is computed with `cv2.findHomography(..., cv2.RANSAC)`.
+   `H`, `H_inv` and the board orientation (0/90/180/270°) are frozen for the game.
+3. **Tracking** – base points are projected onto the 8×8 grid and every legal move of the internal
+   `chess.Board()` is scored against the detections; the best one is pushed. If it still does not fit,
+   the previous move is corrected or a missed frame (two moves) is filled in. python-chess keeps the
+   turn, castling rights, en passant square and move counters.
+4. **Export** – the annotated image shows the projected board border, every box labeled
+   `white-knight @ f3` with a dot on its base point, and a banner with the move number and FEN.
 
 ## 6. schaakpoc v2: training GUI for piece classifiers
 
