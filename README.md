@@ -133,7 +133,8 @@ For every frame `runs/fen/game/move_<num>.jpg` is written and the FEN is appende
    (image → canonical 800×800 board) is computed with `cv2.findHomography(..., cv2.RANSAC)`.
    `H`, `H_inv` and the board orientation (0/90/180/270°) are frozen for the game.
 3. **Tracking** – base points are projected onto the 8×8 grid and every legal move of the internal
-   `chess.Board()` is scored against the detections; the best one is pushed. python-chess keeps the
+   `chess.Board()` is scored against the detections; the best one is pushed. If it still does not fit,
+   the previous move is corrected or a missed frame (two moves) is filled in. python-chess keeps the
    turn, castling rights, en passant square and move counters.
 4. **Export** – the annotated image shows the projected board border, every box labeled
    `white-knight @ f3` with a dot on its base point, and a banner with the move number and FEN.

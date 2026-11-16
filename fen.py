@@ -60,6 +60,8 @@ def main():
             print(f"Calibration failed: {e}")
             return False
         move = f" {out.result.san}" if out.result.san else ""
+        if out.result.corrected:
+            move += " (previous move corrected)"
         print(f"{out.image_path}{move}: {out.fen}")
         return True
 

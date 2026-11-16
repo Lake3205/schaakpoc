@@ -141,3 +141,21 @@ def test_fen_cli_help():
     out = subprocess.run([sys.executable, str(root / "fen.py"), "--help"],
                          capture_output=True, text=True, check=True).stdout
     assert "--source" in out and "moves.fen" in out
+
+
+def test_tracker_resyncs_after_hidden_moved_piece_and_missed_frame():
+    G = camera(0)
+    tracker = GameTracker()
+    truth = chess.Board()
+    tracker.process(scene(truth, G))
+    truth.push_san("e4")
+    hidden = [d for d in scene(truth, G) if d.name != "white-pawn" or d.box[1] > 400 or d.box[3] < 300]
+    first = tracker.process(hidden)  # the moved pawn on e4 is not detected
+    assert first.move is not None and tracker.board.turn == chess.BLACK
+    truth.push_san("e5")
+    second = tracker.process(scene(truth, G))
+    assert tracker.board.fen() == truth.fen() and second.mismatches == 0
+    for san in ["Nf3", "Nc6"]:  # the frame after Nf3 is never captured
+        truth.push_san(san)
+    third = tracker.process(scene(truth, G))
+    assert third.san == "Nf3 Nc6" and tracker.board.fen() == truth.fen()
