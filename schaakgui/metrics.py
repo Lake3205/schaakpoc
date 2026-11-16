@@ -58,3 +58,30 @@ def confidence_curves(confidences, correct, num_points: int = 101) -> dict:
         recall[i] = n_ok / total if total else 0.0
     return {"thresholds": thresholds.tolist(), "precision": precision.tolist(),
             "recall": recall.tolist()}
+
+
+def confusion_delta(cm, classes, baseline_cm, baseline_classes) -> np.ndarray:
+    """Percentage-point change of the normalized confusion matrix against a baseline.
+
+    Cells are aligned by class name; cells of classes missing from the baseline or of rows without
+    samples (in either matrix) are ``NaN``.
+    """
+    current = normalize_confusion(cm)
+    delta = np.full(current.shape, np.nan)
+    base_cm = np.asarray(baseline_cm, dtype=float)
+    if base_cm.ndim != 2 or base_cm.shape[0] != base_cm.shape[1] \
+            or base_cm.shape[0] != len(baseline_classes):
+        return delta
+    base = normalize_confusion(base_cm)
+    base_rows = base_cm.sum(axis=1) > 0
+    rows = np.asarray(cm).sum(axis=1) > 0
+    index = {name: i for i, name in enumerate(baseline_classes)}
+    for r, true_name in enumerate(classes):
+        br = index.get(true_name)
+        if br is None or not rows[r] or not base_rows[br]:
+            continue
+        for c, pred_name in enumerate(classes):
+            bc = index.get(pred_name)
+            if bc is not None:
+                delta[r, c] = (current[r, c] - base[br, bc]) * 100
+    return delta

@@ -139,6 +139,11 @@ Features:
     test images after training.
 
   Shuffle can be toggled and a fixed seed set. A bar chart shows the class balance of the checked pools.
+  A green ✓ badge next to a folder shows that a `.yaml` configuration (with class `names`) was detected.
+  **🔄 Synchronize YAML class names…** lists every tag of the detected `.yaml` files with the files it
+  comes from; pick or type one unified name per tag (e.g. map `W-R` and `White-Rook` to `white-rook`).
+  *Apply* writes the same unified `names` list to every `.yaml` and re-indexes the class ids of all YOLO
+  label files belonging to them (files on disk are modified).
 * **Augmentation** – checkboxes for horizontal/vertical flip, rotation, color jitter, affine/shear and
   random resized crop. They are composed into a `transforms.Compose` used only for the training split.
 * **Training & Quotas** – epochs, batch size, learning rate, image size, architecture (torchvision
@@ -153,11 +158,16 @@ Features:
   the folders used in each session, snapshots and the best weights. Selecting a model shows this in the
   *Model Provenance* card with achieved/pending milestone cards.
 * **Live training** – training runs in a `QThread`; batch and run progress bars, a live log and
-  Pause/Resume/Stop buttons.
+  Pause/Resume/Stop buttons. The *Live quota check* shows every quota objective as `current / target`
+  with the share of the target reached (e.g. `82.0% / 90.0% (91%)`); the *Class Quotas* tab shows per class
+  `correct / needed` validation samples for the accuracy floor (e.g. `9 / 8 (112%)`).
 * **Manual Review** – while paused (validation sets) or after training (test sets), shows random images with ground truth vs.
   top-3 predictions (green border = correct, red = incorrect) with Previous/Next buttons.
 * **Analytics** – confusion matrix, normalized confusion matrix, instance count, precision per epoch and
-  precision/recall vs. confidence threshold, updated after every validation step.
+  precision/recall vs. confidence threshold, updated after every validation step. The normalized confusion
+  matrix shows the change against the previous run (or a baseline chosen in *Normalized matrix Δ baseline*)
+  in every cell, e.g. `0.85 (+3.2%)`: green = improvement (diagonal gain / off-diagonal drop), red =
+  regression. The precision plot is zoomed to `0.75–1.01` and only extends lower when a value falls below.
 
 Run the tests with:
 

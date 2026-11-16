@@ -3,13 +3,20 @@ import pytest
 
 from schaakgui.metrics import (
     confidence_curves,
+    confusion_delta,
     confusion_matrix,
     macro_precision_recall,
     normalize_confusion,
     precision_recall,
 )
 from schaakgui.projects import QuotaConfig
-from schaakgui.quota import EarlyStopping, EarlyStoppingMonitor, QuotaTracker
+from schaakgui.quota import (
+    EarlyStopping,
+    EarlyStoppingMonitor,
+    QuotaTracker,
+    class_progress,
+    objective_progress,
+)
 
 
 def test_quota_milestones_and_all_met():
@@ -89,3 +96,34 @@ def test_confidence_curves():
     assert curves["precision"][0] == pytest.approx(2 / 3)
     assert curves["precision"][7] == 1.0  # threshold 0.7 keeps only the correct 0.9 prediction
     assert curves["recall"][7] == pytest.approx(1 / 3)
+
+
+def test_quota_live_counters():
+    cfg = QuotaConfig(min_accuracy=0.8, target_avg_accuracy=0.9, min_confidence=0.7,
+                      target_avg_confidence=0.8, moving_average_window=2)
+    tracker = QuotaTracker(cfg)
+    assert [r["text"] for r in objective_progress(cfg, tracker.values)][0] == "– / 80.0%"
+    tracker.update(1, 0.7, 0.7)
+    tracker.update(2, 0.82, 0.75)
+    rows = {r["objective"]: r for r in objective_progress(cfg, tracker.values)}
+    assert rows["accuracy_floor"]["text"] == "82.0% / 80.0% (102%)" and rows["accuracy_floor"]["met"]
+    assert rows["accuracy_target"]["value"] == pytest.approx(0.76)
+    assert rows["accuracy_target"]["text"] == "76.0% / 90.0% (84%)" and not rows["accuracy_target"]["met"]
+
+    cm = [[9, 1, 0], [3, 7, 0], [0, 0, 0]]
+    rows = class_progress(cm, ["a", "b", "c"], 0.8)
+    assert [(r["correct"], r["needed"], r["met"]) for r in rows] == [(9, 8, True), (7, 8, False),
+                                                                     (0, 0, False)]
+    assert rows[0]["text"] == "9 / 8 (112%)" and rows[1]["text"] == "7 / 8 (88%)"
+    assert rows[2]["text"] == "0 / 0" and rows[2]["accuracy"] is None
+
+
+def test_confusion_delta_aligned_by_class_name():
+    cm = [[9, 1], [2, 8]]
+    baseline = [[5, 0, 5], [0, 0, 0], [3, 0, 7]]  # classes a, x, b; class x has no samples
+    delta = confusion_delta(cm, ["a", "b"], baseline, ["a", "x", "b"])
+    assert delta[0, 0] == pytest.approx(40) and delta[0, 1] == pytest.approx(-40)
+    assert delta[1, 0] == pytest.approx(-10) and delta[1, 1] == pytest.approx(10)
+    delta = confusion_delta(cm, ["a", "new"], baseline, ["a", "x", "b"])
+    assert delta[0, 0] == pytest.approx(40) and np.isnan(delta[0, 1]) and np.isnan(delta[1]).all()
+    assert np.isnan(confusion_delta(cm, ["a", "b"], [], [])).all()

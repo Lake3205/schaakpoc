@@ -65,18 +65,36 @@ def _yaml_names(path: Path) -> dict[int, str]:
     return {}
 
 
-def yolo_class_names(split_dir: str | Path) -> dict[int, str]:
-    """Class id -> name from the first ``*.yaml`` with ``names`` in the split folder or its parents."""
+def split_yaml(split_dir: str | Path) -> Optional[Path]:
+    """The first ``*.yaml`` with ``names`` in a YOLO split folder or its two parent folders."""
     split_dir = Path(split_dir).resolve()
     for directory in [split_dir, *list(split_dir.parents)[:2]]:
         candidates = [directory / "data.yaml"] + sorted(directory.glob("*.yaml")) \
             + sorted(directory.glob("*.yml"))
         for path in candidates:
-            if path.is_file():
-                names = _yaml_names(path)
-                if names:
-                    return names
-    return {}
+            if path.is_file() and _yaml_names(path):
+                return path
+    return None
+
+
+def yolo_class_names(split_dir: str | Path) -> dict[int, str]:
+    """Class id -> name from the first ``*.yaml`` with ``names`` in the split folder or its parents."""
+    path = split_yaml(split_dir)
+    return _yaml_names(path) if path is not None else {}
+
+
+def dataset_yaml(folder: str | Path) -> Optional[Path]:
+    """The ``.yaml`` configuration (with class ``names``) used for a dataset folder, if any."""
+    dirs = yolo_dirs(folder)
+    if dirs is not None:
+        return split_yaml(dirs[0].parent)
+    folder = Path(folder)
+    if not folder.is_dir():
+        return None
+    for path in [folder / "data.yaml"] + sorted(folder.glob("*.yaml")) + sorted(folder.glob("*.yml")):
+        if path.is_file() and _yaml_names(path):
+            return path.resolve()
+    return None
 
 
 def resolve_placeholder_classes(classes: Sequence[str], folders: Sequence[str | Path]) -> list[str]:

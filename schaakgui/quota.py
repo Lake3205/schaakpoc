@@ -45,6 +45,7 @@ class QuotaTracker:
         self._acc = deque(maxlen=window)
         self._conf = deque(maxlen=window)
         self.current: dict[str, bool] = {k: False for k in OBJECTIVES}
+        self.values: dict[str, float] = {}
 
     def achieved(self, key: str) -> Optional[dict]:
         """First recorded milestone for an objective at (or above) the current threshold."""
@@ -67,6 +68,7 @@ class QuotaTracker:
             "confidence_floor": mean_conf,
             "confidence_target": sum(self._conf) / len(self._conf),
         }
+        self.values = {k: float(v) for k, v in values.items()}
         new = []
         for key, value in values.items():
             threshold = objective_threshold(self.cfg, key)
@@ -94,6 +96,45 @@ class QuotaTracker:
     def describe(self) -> str:
         return ", ".join(f"{OBJECTIVES[k]}: {'OK' if v else 'pending'}"
                          for k, v in self.current.items())
+
+
+def objective_progress(cfg: QuotaConfig, values: dict[str, float]) -> list[dict]:
+    """Live counters per objective: ``current / target`` and the share of the target reached."""
+    rows = []
+    for key, label in OBJECTIVES.items():
+        threshold = objective_threshold(cfg, key)
+        value = values.get(key)
+        if value is None:
+            ratio = None
+        else:
+            ratio = value / threshold if threshold > 0 else 1.0
+        rows.append({"objective": key, "label": label, "value": value, "threshold": threshold,
+                     "ratio": ratio, "met": value is not None and value >= threshold,
+                     "text": (f"{'–' if value is None else f'{value * 100:.1f}%'} / "
+                              f"{threshold * 100:.1f}%"
+                              + ("" if ratio is None else f" ({ratio * 100:.0f}%)"))})
+    return rows
+
+
+def class_progress(cm, classes: list[str], target: float) -> list[dict]:
+    """Per-class quota counters from a confusion matrix (rows = true class).
+
+    A class meets its quota once ``correct >= needed = ceil(target * samples)``; ``text`` reads
+    ``correct / needed (share of the target reached)``.
+    """
+    rows = []
+    for i, name in enumerate(classes):
+        row = cm[i]
+        total = int(sum(row))
+        correct = int(row[i])
+        needed = math.ceil(target * total - 1e-9) if total else 0
+        ratio = (correct / needed if needed else 1.0) if total else None
+        rows.append({"class": name, "correct": correct, "total": total, "needed": needed,
+                     "accuracy": correct / total if total else None, "ratio": ratio,
+                     "met": total > 0 and correct >= needed,
+                     "text": f"{correct} / {needed}" + ("" if ratio is None else
+                                                        f" ({ratio * 100:.0f}%)")})
+    return rows
 
 
 MONITORS = {
