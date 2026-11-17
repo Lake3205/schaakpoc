@@ -302,7 +302,9 @@ def test_scan_dialog_corrections_and_exports(app, tmp_path, monkeypatch):
     dialog.refresh()
     assert dialog.current_step() == 2
     assert dialog.detect_pieces()
+    assert not dialog.models_row.isEnabled()  # no model swaps during detection
     wait_until(app, lambda: not dialog.busy, 30)
+    assert dialog.models_row.isEnabled()
     assert tester.calls == 1 and not warnings
     assert dialog.fen_edit.text().startswith("4k3/p7/2n5/8/8/8/P6P/3QK3 w")
     assert dialog.current_step() == 3 and "Nothing to review" in dialog.problems.item(0).text()
@@ -438,6 +440,11 @@ def test_board_task_and_scanner_buttons(app, tmp_path, monkeypatch):
     assert window.val_folders.checked() == created["valid"]
     window.data_tools_button.click()  # no duplicates
     assert window.test_folders.checked() == created["test"]
+    window.task_combo.setCurrentIndex(window.task_combo.findData("classify"))
+    window.train_folders.set_entries([])
+    window.data_tools_button.click()  # YOLO folders are not added to classifier datasets
+    assert window.train_folders.entries() == []
+    window.task_combo.setCurrentIndex(window.task_combo.findData("detect"))
 
     def fake_scan_exec(dialog):
         seen["scan"] = dialog

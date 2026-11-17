@@ -1652,7 +1652,11 @@ class MainWindow(QMainWindow):
         self.data_tools_dialog = dialog
         dialog.exec()
         self.data_tools_dialog = None
-        self.add_created_folders(dialog.created_folders())
+        if self.yolo_task:  # YOLO split folders are no class-per-folder classifier datasets
+            self.add_created_folders(dialog.created_folders())
+        elif dialog.results:
+            self.log("Data tools created YOLO datasets; switch to a detection or board corners task "
+                     f"to train on them ({dialog.output_root}).")
 
     def add_created_folders(self, folders: dict[str, list[str]]):
         """Add (checked) dataset folders per split: train → training, valid → validation, test → test."""

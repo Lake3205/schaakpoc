@@ -422,7 +422,9 @@ class ScanDialog(QDialog):
         add_board.clicked.connect(lambda: self.choose_import("board"))
         for button in (add_pieces, add_board):
             button.setEnabled(import_model is not None)
-        models = QGridLayout()
+        self.models_row = QWidget()
+        models = QGridLayout(self.models_row)
+        models.setContentsMargins(0, 0, 0, 0)
         models.addWidget(QLabel("<b>Piece detector</b>"), 0, 0)
         models.addWidget(self.pieces_combo, 0, 1)
         models.addWidget(add_pieces, 0, 2)
@@ -566,7 +568,7 @@ class ScanDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(steps)
-        layout.addLayout(models)
+        layout.addWidget(self.models_row)
         layout.addWidget(self.body, 1)
         layout.addLayout(bottom)
 
@@ -715,6 +717,7 @@ class ScanDialog(QDialog):
                                         "detector first.")
             return False
         self.body.setEnabled(False)
+        self.models_row.setEnabled(False)  # no model swaps while the worker uses the session
         self.status.setText("♟ Detecting pieces…")
         self.thread, self.worker = start_call(self.session.detect_pieces, self.session.conf)
         self.worker.finished.connect(self.on_detected)
@@ -728,6 +731,7 @@ class ScanDialog(QDialog):
             self.thread.deleteLater()
         self.thread = self.worker = None
         self.body.setEnabled(True)
+        self.models_row.setEnabled(True)
         self.refresh()
 
     def on_detected(self, _result=None):
