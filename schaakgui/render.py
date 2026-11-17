@@ -204,6 +204,18 @@ def draw_diagram(squares: dict[str, str], size: int = 640, white_bottom: bool = 
     return out
 
 
+def diagram_square(x: float, y: float, size: int = 640, white_bottom: bool = True) -> Optional[str]:
+    """Square name under a point of a :func:`draw_diagram` image (``None`` in the margin)."""
+    margin = size // 20
+    square = (size - 2 * margin) / 8
+    col, row = int((x - margin) // square), int((y - margin) // square)
+    if not (0 <= col < 8 and 0 <= row < 8):
+        return None
+    file = col if white_bottom else 7 - col
+    rank = 7 - row if white_bottom else row
+    return f"{FILES[file]}{rank + 1}"
+
+
 def save_image(image: Image.Image, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

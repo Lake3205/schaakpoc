@@ -9,4 +9,5 @@ matplotlib
 numpy
 pillow
 pyyaml
+chess  # python-chess: FEN + legality checks of the garden chess scanner
 pytest

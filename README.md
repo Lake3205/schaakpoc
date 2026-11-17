@@ -13,6 +13,7 @@ and **YOLO** (Ultralytics) for detection, running on an NVIDIA RTX 5070 GPU.
 | `chess.yaml` | Dataset config (12 classes: white/black king, queen, rook, bishop, knight, pawn) |
 | `app.py` | **v3** desktop GUI (PyQt6) to train *object detectors* (default) or *image classifiers* (see section 6) |
 | `schaakgui/` | Code of the GUI: projects, datasets, augmentations, detector/classifier training, quotas, checkpoints |
+| `scan.py` | Garden chess scanner on the command line: photo → FEN, annotated photo, board diagram (see section 7) |
 
 ## 1. Setup (Windows or Linux, Python 3.10+)
 
@@ -218,3 +219,35 @@ Run the tests with:
 ```bash
 python -m pytest tests
 ```
+
+## 7. Garden chess scanner (photo → FEN)
+
+Five explainable steps, each saved as an image with `--debug` / **Export debug images**:
+
+```text
+photo ─► 1 board corners ─► 2 straighten (homography) ─► 3 detect pieces ─► 4 pieces → squares ─► 5 FEN + exports
+         (YOLO-pose model,   (8×8 grid, 800 px)           (YOLO detector)     (foot point of each   (python-chess,
+          OpenCV fallback,                                                     box, 1 per square)    PNG/TXT)
+          or drag by hand)
+```
+
+Only two networks are used: the 12-class piece **detector** (task *Detection*) and a 4-keypoint
+**board corner** model (task *Board corners*, YOLO-pose, base model `yolo26s-pose.pt`).
+
+**GUI:** **♟ Scan board** opens the scan screen: open a photo, check/drag the 4 corners, detect the
+pieces, confirm where a1 is (⟳ Rotate a1), click diagram squares to correct them, then export the FEN,
+annotated photo, diagram, debug images or **Save as Training Sample** (photo + YOLO boxes + corner
+label, per split). **🧰 Data tools…** generates synthetic board-corner datasets and imports ChessReD2K;
+the created folders are added to the dataset lists.
+
+**CLI:**
+
+```bash
+python scan.py photo.jpg --pieces pieces.pt --board board.pt --out out/ --debug
+python scan.py photo.jpg --pieces pieces.pt --corners 260,150,640,150,820,620,80,620 --a1 3 --out out/
+python scan.py --evaluate chessred/annotations.json --images chessred --pieces pieces.pt --board board.pt --out eval/
+```
+
+Outputs: `fen.txt`, `annotated.png`, `diagram.png`, `scan.json` (+ `1_corners.png` … `5_diagram.png`
+with `--debug`; `evaluation.json` with `--evaluate`). See `SCANNER_IMPLEMENTATION.md` for what is
+implemented and which data you still have to collect yourself.

@@ -38,7 +38,10 @@ from .detector import (  # noqa: F401 - ImageTester is re-exported for older imp
     load_picture,
     load_yolo_detector,
 )
+from .render import draw_corners
 
+CORNER_PRED_RGB = (0, 200, 83)
+CORNER_TRUTH_RGB = (41, 121, 255)
 PICTURE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff);;All files (*)"
 EMPTY_AREA_STYLE = ("border: 3px dashed #90a4ae; border-radius: 12px; color: #607d8b; "
                     "font-size: 18px; background: #f5f7f8;")
@@ -223,13 +226,23 @@ class DetectionReviewDialog(QDialog):
     def _show(self, result: dict):
         c = result["counts"]
         color = "#2e7d32" if c["perfect"] else "#c62828"
-        self.pred_image.setPixmap(to_pixmap(result["pred_image"], 580))
-        self.truth_image.setPixmap(to_pixmap(result["truth_image"], 580))
+        pred_image, truth_image = result["pred_image"], result["truth_image"]
+        corner_text = ""
+        if "pred_corners" in result:  # board corner (pose) model: show the 4 corners
+            pred_image = draw_corners(pred_image, result["pred_corners"], CORNER_PRED_RGB)
+            truth_image = draw_corners(truth_image, result["truth_corners"], CORNER_TRUTH_RGB)
+            error = result.get("corner_error")
+            corner_text = ("  ·  Corners: not found" if result["pred_corners"] is None else
+                           f"  ·  Corner error: {error:.2f}% of the board diagonal" if error is not None
+                           else "")
+        self.pred_image.setPixmap(to_pixmap(pred_image, 580))
+        self.truth_image.setPixmap(to_pixmap(truth_image, 580))
         self.badge.setText(("ALL CORRECT" if c["perfect"] else "MISTAKES")
                            + f" – {c['correct']} / {c['truths']} objects correct")
         self.badge.setStyleSheet(f"background: {color}; color: white; font-weight: bold; padding: 4px;")
         self.details.setText(f"Wrong class: {c['wrong_class']}  ·  Missed: {c['missed']}  ·  "
-                             f"Extra boxes: {c['extra']}<br><small>{html.escape(result['path'])}</small>")
+                             f"Extra boxes: {c['extra']}{corner_text}"
+                             f"<br><small>{html.escape(result['path'])}</small>")
         self.counter.setText(f"image {self.session.position + 1} / {len(self.session.history)}")
         self.prev_button.setEnabled(self.session.position > 0)
 

@@ -89,6 +89,9 @@ class DetectorConfig:
     mosaic: bool = True
     resume_from: Optional[str] = None  # fine-tune from earlier detector weights
     freeze: int = 0  # fine-tuning: keep the first N layers fixed (0 = train all layers)
+    # The board corner (pose) task keeps its own base model and fine-tune source.
+    board_base_model: str = "yolo26s-pose.pt"
+    board_resume_from: Optional[str] = None
 
 
 TASKS = {"detect": "Detection (boxes, many objects per image)",
