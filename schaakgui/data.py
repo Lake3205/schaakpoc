@@ -83,6 +83,25 @@ def yolo_class_names(split_dir: str | Path) -> dict[int, str]:
     return _yaml_names(path) if path is not None else {}
 
 
+def yolo_kpt_shape(split_dir: str | Path) -> Optional[list[int]]:
+    """``kpt_shape`` (e.g. ``[4, 3]``) of a YOLO-pose split's yaml, ``None`` for box/segment data."""
+    path = split_yaml(split_dir)
+    if path is None:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return None
+    shape = data.get("kpt_shape") if isinstance(data, dict) else None
+    if isinstance(shape, (list, tuple)) and len(shape) == 2:
+        try:
+            return [int(shape[0]), int(shape[1])]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def dataset_yaml(folder: str | Path) -> Optional[Path]:
     """The ``.yaml`` configuration (with class ``names``) used for a dataset folder, if any."""
     dirs = yolo_dirs(folder)
@@ -118,10 +137,13 @@ def resolve_placeholder_classes(classes: Sequence[str], folders: Sequence[str | 
     return resolved if len(set(resolved)) == len(resolved) else list(classes)
 
 
-def read_yolo_labels(label_file: str | Path) -> list[tuple[int, tuple[float, float, float, float]]]:
+def read_yolo_labels(label_file: str | Path, kpt_shape: Optional[Sequence[int]] = None
+                     ) -> list[tuple[int, tuple[float, float, float, float]]]:
     """``[(class_id, (x1, y1, x2, y2))]`` with normalized corners from a YOLO label file.
 
     Supports box lines (``cls xc yc w h``) and segmentation lines (``cls x1 y1 x2 y2 ...``).
+    With ``kpt_shape`` (pose data) the line is ``cls xc yc w h`` followed by keypoints, so only the
+    first 4 values are used as the box.
     """
     result = []
     try:
@@ -137,8 +159,8 @@ def read_yolo_labels(label_file: str | Path) -> list[tuple[int, tuple[float, flo
             values = [float(v) for v in parts[1:]]
         except ValueError:
             continue
-        if len(values) == 4:
-            xc, yc, w, h = values
+        if len(values) == 4 or (kpt_shape is not None and len(values) >= 4):
+            xc, yc, w, h = values[:4]
             x1, y1, x2, y2 = xc - w / 2, yc - h / 2, xc + w / 2, yc + h / 2
         else:
             xs, ys = values[0::2], values[1::2]
@@ -153,10 +175,11 @@ def read_yolo_labels(label_file: str | Path) -> list[tuple[int, tuple[float, flo
 def scan_yolo_folder(images_dir: Path, labels_dir: Path) -> dict[str, list[tuple[str, Box]]]:
     """``{class_name: [(image path, box)]}`` for every labeled box of a YOLO split."""
     names = yolo_class_names(images_dir.parent)
+    kpt_shape = yolo_kpt_shape(images_dir.parent)
     result: dict[str, list[tuple[str, Box]]] = {}
     for image in sorted(p for p in images_dir.rglob("*") if is_image(p)):
         label_file = (labels_dir / image.relative_to(images_dir)).with_suffix(".txt")
-        for cls, box in read_yolo_labels(label_file):
+        for cls, box in read_yolo_labels(label_file, kpt_shape):
             result.setdefault(names.get(cls, f"class_{cls}"), []).append((str(image), box))
     return dict(sorted(result.items()))
 

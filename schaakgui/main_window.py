@@ -1,6 +1,7 @@
 """Main desktop window: projects, datasets, augmentations, quotas, training and analytics."""
 from __future__ import annotations
 
+import dataclasses
 import html
 import math
 from datetime import datetime
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .board import BoardFinder
 from .checkpoint import ARCHITECTURES, Lineage, read_lineage, session_val_folders
 from .data import class_counts, dataset_yaml, enabled_augmentations
 from .detector import (
@@ -49,14 +51,16 @@ from .detector import (
     DetectionReviewSession,
     DetectorJob,
     evaluate_detector,
-    import_detector,
-    list_detectors,
+    import_model,
+    list_models,
     read_run_info,
     ultralytics_augmentation,
 )
 from .engine import TrainJob, evaluate_checkpoint
 from .plots import PlotCanvas
-from .projects import TASKS, DatasetEntry, Project, ProjectManager, QuotaConfig
+from .data_tools_dialog import DataToolsDialog
+from .projects import (TASKS, DatasetEntry, Project, ProjectManager, QuotaConfig, base_model_fits,
+                       default_base_model)
 from .quota import OBJECTIVES, QuotaTracker, class_progress, objective_progress, objective_threshold
 from .review_dialog import (
     DetectionReviewDialog,
@@ -65,9 +69,18 @@ from .review_dialog import (
     ReviewDialog,
     ReviewSession,
 )
+from .scan_dialog import ScanDialog
+from .scan_session import ScanSession
 from .sync_dialog import YamlSyncDialog
 from .yaml_sync import unique_yaml_paths
 from .worker import TrainingWorker, start_detector_worker, start_worker
+
+def _preferred_first(paths: list[str], preferred: Optional[str]) -> list[str]:
+    """``paths`` with ``preferred`` (when present) moved to the front."""
+    if preferred and preferred in paths:
+        return [preferred] + [p for p in paths if p != preferred]
+    return paths
+
 
 STOP_REASONS = {
     "completed": "all epochs completed",
@@ -75,6 +88,9 @@ STOP_REASONS = {
     "early_stopping": "early stopping (no improvement)",
     "user": "stopped by user",
 }
+YOLO_TASKS = ("detect", "board")
+POSE_BASE_MODELS = tuple(f"{family}{size}-pose.pt" for family in ("yolo26", "yolo11")
+                         for size in "nsmlx")
 DETECTION_METRICS = {"precision": "Precision", "recall": "Recall", "mAP50": "mAP50",
                      "mAP50_95": "mAP50-95"}
 
@@ -446,7 +462,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(self.detect_box)
         self.det_base_combo = QComboBox()
         self.det_base_combo.setEditable(True)
-        self.det_base_combo.addItems(DETECTOR_BASE_MODELS)
+        self.det_base_combo.addItems(DETECTOR_BASE_MODELS + POSE_BASE_MODELS)
         self.det_base_combo.setToolTip("Ultralytics weights to start from (downloaded automatically); "
                                        "n = fastest … x = most accurate.")
         self.det_epochs_spin = _spin(1, 10_000, 50)
@@ -458,6 +474,10 @@ class MainWindow(QMainWindow):
         self.det_snapshot_spin = _spin(0, 10_000, 0, " epochs")
         self.det_snapshot_spin.setSpecialValueText("never")
         self.det_workers_spin = _spin(0, 32, 0)
+        self.det_freeze_spin = _spin(0, 100, 0, " layers")
+        self.det_freeze_spin.setSpecialValueText("off")
+        self.det_freeze_spin.setToolTip("Fine-tuning: keep the first N layers fixed (e.g. 10 = backbone) "
+                                        "when continuing from a model on a small dataset.")
         self.det_mosaic_check = QCheckBox("Mosaic (combine 4 training images into one)")
         self.det_mosaic_check.setToolTip("Ultralytics' standard detection augmentation; turned off "
                                          "automatically for the last 10 epochs.")
@@ -468,13 +488,11 @@ class MainWindow(QMainWindow):
         form.addRow("Early stopping patience", self.det_patience_spin)
         form.addRow("Save weights every", self.det_snapshot_spin)
         form.addRow("Data loader workers", self.det_workers_spin)
+        form.addRow("Freeze first", self.det_freeze_spin)
         form.addRow(self.det_mosaic_check)
-        help_label = QLabel("<small>Uses the checked YOLO training/validation folders (any classes; "
-                            "run <i>Synchronize YAML class names</i> first if their names differ). "
-                            "Augmentation tab settings are applied box-aware. Results are saved in "
-                            "<code>checkpoints/detectors/</code> of the project.</small>")
-        help_label.setWordWrap(True)
-        form.addRow(help_label)
+        self.detect_help = QLabel()
+        self.detect_help.setWordWrap(True)
+        form.addRow(self.detect_help)
         layout.insertWidget(0, self.detect_box)
         layout.addStretch()
         return tab
@@ -546,8 +564,15 @@ class MainWindow(QMainWindow):
         self.review_button.clicked.connect(self.open_review)
         self.picture_button.clicked.connect(self.open_picture_test)
         self.exam_button.clicked.connect(self.run_final_exam)
+        self.scan_button = QPushButton("♟ Scan board")
+        self.scan_button.setToolTip("Garden chess scanner: photo → corners → pieces → FEN, annotated "
+                                    "photo and board diagram")
+        self.scan_button.clicked.connect(self.open_scan)
+        self.data_tools_button = QPushButton("🧰 Data tools…")
+        self.data_tools_button.setToolTip("Generate synthetic board datasets or import ChessReD2K")
+        self.data_tools_button.clicked.connect(self.open_data_tools)
         for b in (self.start_button, self.pause_button, self.stop_button, self.review_button,
-                  self.picture_button, self.exam_button):
+                  self.picture_button, self.exam_button, self.scan_button, self.data_tools_button):
             buttons.addWidget(b)
         layout.addLayout(buttons)
 
@@ -756,13 +781,13 @@ class MainWindow(QMainWindow):
         self.monitor_combo.setEnabled(q.early_stopping)
 
         d = p.detector
-        self.det_base_combo.setCurrentText(d.base_model)
         self.det_epochs_spin.setValue(d.epochs)
         self.det_image_size_spin.setValue(d.image_size)
         self.det_batch_spin.setValue(d.batch_size)
         self.det_patience_spin.setValue(d.patience)
         self.det_snapshot_spin.setValue(d.snapshot_every)
         self.det_workers_spin.setValue(d.num_workers)
+        self.det_freeze_spin.setValue(d.freeze)
         self.det_mosaic_check.setChecked(d.mosaic)
 
         self.task_combo.blockSignals(True)
@@ -775,11 +800,18 @@ class MainWindow(QMainWindow):
         self.on_datasets_changed()
 
     def _load_resume(self, p: Project):
-        """Resume fields show the classifier checkpoint or the detector to continue from."""
+        """Resume fields show the classifier checkpoint or the YOLO model to continue from; the board
+        (pose) task has its own base model and fine-tune source."""
         self._form_task = p.task
-        resume = p.detector.resume_from if p.task == "detect" else p.resume_checkpoint
+        d = p.detector
+        resume = {"detect": d.resume_from, "board": d.board_resume_from}.get(p.task,
+                                                                            p.resume_checkpoint)
         self.resume_check.setChecked(bool(resume))
         self.resume_edit.setText(resume or "")
+        base = d.board_base_model if p.task == "board" else d.base_model
+        if not base_model_fits(base, p.task if p.task == "board" else "detect"):
+            base = default_base_model(p.task)
+        self.det_base_combo.setCurrentText(base)
 
     def _collect_form(self, p: Project):
         p.train_folders = self.train_folders.entries()
@@ -827,19 +859,27 @@ class MainWindow(QMainWindow):
         q.monitor = self.monitor_combo.currentData()
 
         d = p.detector
-        d.base_model = self.det_base_combo.currentText().strip() or d.base_model
+        form_task = getattr(self, "_form_task", p.task)
+        base = self.det_base_combo.currentText().strip()
+        if base and form_task == "board":
+            d.board_base_model = base
+        elif base and form_task == "detect":
+            d.base_model = base
         d.epochs = self.det_epochs_spin.value()
         d.image_size = self.det_image_size_spin.value()
         d.batch_size = self.det_batch_spin.value()
         d.patience = self.det_patience_spin.value()
         d.snapshot_every = self.det_snapshot_spin.value()
         d.num_workers = self.det_workers_spin.value()
+        d.freeze = self.det_freeze_spin.value()
         d.mosaic = self.det_mosaic_check.isChecked()
 
         resume = self.resume_edit.text().strip()
         resume = resume if self.resume_check.isChecked() and resume else None
-        if getattr(self, "_form_task", p.task) == "detect":
+        if form_task == "detect":
             d.resume_from = resume
+        elif form_task == "board":
+            d.board_resume_from = resume
         else:
             p.resume_checkpoint = resume
         p.task = self.task_combo.currentData() or p.task
@@ -848,6 +888,11 @@ class MainWindow(QMainWindow):
     @property
     def task(self) -> str:
         return self.task_combo.currentData() or "detect"
+
+    @property
+    def yolo_task(self) -> bool:
+        """Detection and board corners are both trained/evaluated with Ultralytics YOLO."""
+        return self.task in YOLO_TASKS
 
     def on_task_changed(self, _index: int = 0):
         if self._loading or self.project is None:
@@ -865,10 +910,24 @@ class MainWindow(QMainWindow):
         self.log(f"Task: {TASKS[self.task]}")
 
     def apply_task_ui(self):
-        detect = self.task == "detect"
-        self.setWindowTitle("schaakpoc v3 – "
-                            + ("Object Detection Trainer" if detect else "Image Classifier Trainer"))
+        detect = self.yolo_task
+        board = self.task == "board"
+        self.setWindowTitle("schaakpoc v3 – " + ("Board Corner Trainer" if board else
+                                                  "Object Detection Trainer" if detect else
+                                                  "Image Classifier Trainer"))
         self.detect_box.setVisible(detect)
+        self.detect_box.setTitle("Board corner training (Ultralytics YOLO-pose, 4 corner keypoints)"
+                                 if board else
+                                 "Detection training (Ultralytics YOLO, boxes on YOLO folders)")
+        self.detect_help.setText(
+            "<small>Uses the checked YOLO-pose training/validation folders (class <i>board</i>, 4 "
+            "keypoints TL, TR, BR, BL – e.g. from <i>Data tools</i>). Pick a <code>-pose</code> base "
+            "model. Results are saved in <code>checkpoints/boards/</code> of the project.</small>"
+            if board else
+            "<small>Uses the checked YOLO training/validation folders (any classes; run "
+            "<i>Synchronize YAML class names</i> first if their names differ). Augmentation tab "
+            "settings are applied box-aware. Results are saved in <code>checkpoints/detectors/</code> "
+            "of the project.</small>")
         for group in self.classify_groups:
             group.setVisible(not detect)
         self.quota_box.setVisible(not detect)
@@ -881,13 +940,15 @@ class MainWindow(QMainWindow):
         self.aug_contrast.setEnabled(not detect)
         self.aug_contrast.setToolTip("Not available for detection (Ultralytics has no contrast "
                                      "augmentation)" if detect else "")
-        self.resume_box.setTitle("Continue training from a detector (fine-tune)" if detect
+        kind = "board model" if board else "detector"
+        self.resume_box.setTitle(f"Continue training from a {kind} (fine-tune)" if detect
                                  else "Resume training")
         self.resume_check.setText("Continue from:" if detect else "Resume from:")
-        self.resume_edit.setPlaceholderText("detector weights .pt" if detect
+        self.resume_edit.setPlaceholderText(f"{kind} weights .pt" if detect
                                             else "checkpoint .pt / .pth")
-        self.saved_box.setTitle("Saved detectors in this project" if detect
+        self.saved_box.setTitle(f"Saved {kind}s in this project" if detect
                                 else "Saved models in this project")
+        self.import_detector_button.setText(f"Import {kind}…")
         self.import_detector_button.setVisible(detect)
 
     def _safe_counts(self, folders: list[str]) -> dict[str, int]:
@@ -941,7 +1002,7 @@ class MainWindow(QMainWindow):
         if self._loading or self.project is None:
             return
         self._collect_form(self.project)
-        if self.task == "detect":
+        if self.yolo_task:
             settings = ultralytics_augmentation(self.project.augmentation, self.project.detector.mosaic)
             active = [f"{k}={v:g}" for k, v in settings.items() if v]
             self.aug_preview.setText("<b>Ultralytics settings:</b> "
@@ -964,6 +1025,8 @@ class MainWindow(QMainWindow):
         self.review_button.setEnabled(not running)
         self.picture_button.setEnabled(not running)
         self.exam_button.setEnabled(not running)
+        self.scan_button.setEnabled(not running)
+        self.data_tools_button.setEnabled(not running)
         if not running:
             self.pause_button.setText("⏸ Pause")
 
@@ -989,7 +1052,7 @@ class MainWindow(QMainWindow):
     def start_training(self):
         if self.project is None or self.is_training():
             return
-        if self.task == "detect":
+        if self.yolo_task:
             self.start_detector_training()
             return
         self.save_project()
@@ -1106,7 +1169,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ checkpoints
     def browse_checkpoint(self):
-        detect = self.task == "detect"
+        detect = self.yolo_task
         path, _ = QFileDialog.getOpenFileName(
             self, "Select detector weights" if detect else "Select checkpoint", "",
             "YOLO weights (*.pt)" if detect else "PyTorch checkpoints (*.pt *.pth)")
@@ -1126,9 +1189,10 @@ class MainWindow(QMainWindow):
         current = select or self.checkpoint_list.currentItem() and self.checkpoint_list.currentItem().text()
         self.checkpoint_list.blockSignals(True)
         self.checkpoint_list.clear()
-        if self.task == "detect":
-            paths = self.project_detectors()
-            fallback = self.project.detector.resume_from
+        if self.yolo_task:
+            paths = self.project_models(self.task)
+            fallback = (self.project.detector.board_resume_from if self.task == "board"
+                        else self.project.detector.resume_from)
         else:
             paths = self.manager.list_checkpoints(self.project)
             fallback = self.project.resume_checkpoint
@@ -1173,7 +1237,7 @@ class MainWindow(QMainWindow):
         if not path:
             self.provenance_label.setText("Select a saved model to see its provenance.")
             return
-        if self.task == "detect":
+        if self.yolo_task:
             self.provenance_label.setText(self.detector_provenance_html(path))
             return
         try:
@@ -1275,7 +1339,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Manual Review",
                                     "Check a test, validation or training folder first.")
             return
-        if self.task == "detect":
+        if self.yolo_task:
             try:
                 session = DetectionReviewSession(checkpoint, folders, self.project.seed)
             except Exception as e:
@@ -1302,42 +1366,62 @@ class MainWindow(QMainWindow):
         ImageTestDialog(ImageTester(), self, detectors, self.import_project_detector).exec()
 
     # --------------------------------------------------------------- detector
-    def project_detectors(self) -> list[str]:
-        """Detector weights stored in this project, newest first."""
+    def project_models(self, task: str = "detect") -> list[str]:
+        """YOLO weights of a task (``detect`` pieces / ``board`` corners) in this project, newest first."""
         if self.project is None:
             return []
-        return list_detectors(self.manager.project_dir(self.project.name))
+        return list_models(self.manager.project_dir(self.project.name), task)
 
-    def import_project_detector(self, source: str) -> str:
-        path = import_detector(self.manager.project_dir(self.project.name), source)
-        self.log(f"Detector imported into the project: {path}")
-        if self.task == "detect":
+    def project_detectors(self) -> list[str]:
+        """Detector weights stored in this project, newest first."""
+        return self.project_models("detect")
+
+    def import_project_model(self, source: str, task: str = "detect") -> str:
+        path = import_model(self.manager.project_dir(self.project.name), source, task)
+        self.log(f"{'Board model' if task == 'board' else 'Detector'} imported into the project: {path}")
+        if self.task == task:
             self.refresh_checkpoints(select=path)
         return path
+
+    def import_project_detector(self, source: str) -> str:
+        return self.import_project_model(source, "detect")
 
     def browse_import_detector(self):
         if self.project is None:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Import YOLO detector weights", "",
+        task = self.task if self.yolo_task else "detect"
+        kind = "board model" if task == "board" else "detector"
+        path, _ = QFileDialog.getOpenFileName(self, f"Import YOLO {kind} weights", "",
                                               "YOLO weights (*.pt);;All files (*)")
         if not path:
             return
         try:
-            self.import_project_detector(path)
+            self.import_project_model(path, task)
         except Exception as e:
-            QMessageBox.warning(self, "Import detector", f"Cannot import the detector:\n{e}")
+            QMessageBox.warning(self, f"Import {kind}", f"Cannot import the {kind}:\n{e}")
 
     def build_detector_job(self) -> DetectorJob:
         p = self.project
+        config = p.detector
+        if self.task == "board":
+            config = dataclasses.replace(config, base_model=config.board_base_model,
+                                         resume_from=config.board_resume_from)
         return DetectorJob(train_folders=p.checked_train_folders(), val_folders=p.checked_val_folders(),
-                           project_dir=str(self.manager.project_dir(p.name)), config=p.detector,
-                           augmentation=p.augmentation, seed=p.seed, device=self.detector_device)
+                           project_dir=str(self.manager.project_dir(p.name)), config=config,
+                           augmentation=p.augmentation, seed=p.seed, device=self.detector_device,
+                           task=self.task)
 
     def start_detector_training(self):
         self.save_project()
         job = self.build_detector_job()
         if not job.train_folders:
             QMessageBox.warning(self, "Start training", "Check at least one YOLO training folder.")
+            return
+        if not job.config.resume_from and not base_model_fits(job.config.base_model, job.task):
+            QMessageBox.warning(self, "Start training",
+                                f"Base model {job.config.base_model} does not fit this task; use a "
+                                + ("-pose model (e.g. yolo26s-pose.pt)." if job.task == "board"
+                                   else "detection model (e.g. yolo26m.pt)."))
             return
         if job.config.resume_from and not Path(job.config.resume_from).is_file():
             QMessageBox.warning(self, "Start training",
@@ -1349,7 +1433,8 @@ class MainWindow(QMainWindow):
         self.run_progress.setMaximum(job.config.epochs)
         self.run_progress.setValue(0)
         self.paused_checkpoint = None
-        self.log(f"=== Detection training started ({job.config.resume_from or job.config.base_model}, "
+        self._yolo_job_task = job.task
+        self.log(f"=== {'Board corner' if job.task == 'board' else 'Detection'} training started ({job.config.resume_from or job.config.base_model}, "
                  f"{job.config.epochs} epochs) ===")
         self.thread, self.worker = start_detector_worker(job)
         self.worker.log.connect(self.log)
@@ -1383,7 +1468,7 @@ class MainWindow(QMainWindow):
     def on_detector_finished(self, summary: dict):
         self.paused_checkpoint = None
         if self.project is not None:
-            record = {"type": "detect",
+            record = {"type": getattr(self, "_yolo_job_task", "detect"),
                       **{k: summary[k] for k in ("finished_at", "stop_reason", "epochs", "best_epoch",
                                                  "metrics", "weights", "output_dir")}}
             if self.current_eval is not None and not self.current_eval["prefix"]:
@@ -1434,7 +1519,7 @@ class MainWindow(QMainWindow):
         if not folders:
             QMessageBox.information(self, "Final exam", "Check at least one test folder first.")
             return
-        if self.task == "detect":
+        if self.yolo_task:
             self._final_exam_detection(checkpoint, folders)
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -1507,33 +1592,115 @@ class MainWindow(QMainWindow):
             summary += "\n\nPer class (P / R / mAP50):\n" + "\n".join(
                 f"{c['class']}: {c['precision'] * 100:.0f}% / {c['recall'] * 100:.0f}% / "
                 f"{c['mAP50'] * 100:.0f}%" for c in result["per_class"])
+        board = result.get("task") == "board"
+        if board:
+            error = result.get("corner_error")
+            summary += ("\n\nCorner error (% of the board diagonal): "
+                        + ("–" if error is None else
+                           f"mean {error:.2f}%, median {result['corner_error_median']:.2f}%")
+                        + f"\nBoards within 2%: {result['corner_within_2pct']:.1f}%"
+                        + f"\nBoards missed: {result['corner_missed']} / {result['corner_images']}")
         if seen:
             summary += ("\n\nWarning: these test folders were used during training/validation, so "
                         "this is not an independent exam:\n" + "\n".join(seen))
         self.log("=== Final exam on test sets ===\n" + summary)
+        corner_keys = ("corner_images", "corner_missed", "corner_error", "corner_error_median",
+                       "corner_within_2pct") if board else ()
         self.project.evaluations.append({
-            "type": "detect_test",
+            "type": "board_test" if board else "detect_test",
             "finished_at": datetime.now().isoformat(timespec="seconds"),
             **{k: result[k] for k in ("weights", "test_folders", "images", "precision", "recall",
                                       "mAP50", "mAP50_95", "per_class", "confusion", "classes")},
+            **{k: result.get(k) for k in corner_keys},
             "seen_in_training": seen,
         })
         self.manager.save(self.project)
         self.refresh_baselines()
         QMessageBox.information(self, "Final exam", summary)
 
+    # ------------------------------------------------------- scanner & data tools
+    def open_scan(self):
+        """Garden chess scanner with the project's piece detectors and board corner models."""
+        if self.project is None:
+            return
+        self._collect_form(self.project)
+        settings = self.project.scan
+        detectors = _preferred_first(self.project_detectors(), settings.piece_model)
+        boards = _preferred_first(self.project_models("board"), settings.board_model)
+        session = ScanSession(ImageTester(), BoardFinder(), conf=settings.conf, lift=settings.lift)
+        sample_root = settings.sample_root or str(self.manager.project_dir(self.project.name)
+                                                  / "scan_samples")
+        dialog = ScanDialog(session, detectors, boards, sample_root=sample_root,
+                            import_model=self.import_project_model, parent=self)
+        self.scan_dialog = dialog
+        dialog.exec()
+        settings.piece_model = getattr(session.tester, "detector_path", None) or settings.piece_model
+        settings.board_model = getattr(session.finder, "model_path", None)
+        settings.conf, settings.lift = session.conf, session.lift
+        if dialog.sample_root is not None:
+            settings.sample_root = str(dialog.sample_root)
+        self.scan_dialog = None
+        self.save_project()
+
+    def open_data_tools(self):
+        """Synthetic board / ChessReD2K datasets; created folders are added to the dataset lists."""
+        if self.project is None:
+            return
+        output = self.manager.project_dir(self.project.name) / "datasets"
+        task = "board" if self.task == "board" else "detect"
+        dialog = DataToolsDialog(output, task, self)
+        self.data_tools_dialog = dialog
+        dialog.exec()
+        self.data_tools_dialog = None
+        if self.yolo_task:  # YOLO split folders are no class-per-folder classifier datasets
+            self.add_created_folders(dialog.created_folders())
+        elif dialog.results:
+            self.log("Data tools created YOLO datasets; switch to a detection or board corners task "
+                     f"to train on them ({dialog.output_root}).")
+
+    def add_created_folders(self, folders: dict[str, list[str]]):
+        """Add (checked) dataset folders per split: train → training, valid → validation, test → test."""
+        targets = {"train": self.train_folders, "valid": self.val_folders, "test": self.test_folders}
+        added = []
+        for split, paths in folders.items():
+            target = targets.get(split)
+            if target is None:
+                continue
+            known = {e.path for e in target.entries()}
+            new = [DatasetEntry(path) for path in paths if path not in known]
+            if new:
+                target.set_entries(target.entries() + new)
+                added.extend(e.path for e in new)
+        if added:
+            self.log("Dataset folders added: " + ", ".join(added))
+            self.on_datasets_changed()
+            self.save_project()
+
     # ------------------------------------------------- baselines & live quota
     @staticmethod
     def _record_task(record: dict) -> str:
-        return "detect" if record.get("type") in ("detect", "detect_test") else "classify"
+        kind = record.get("type")
+        if kind in ("detect", "detect_test"):
+            return "detect"
+        if kind in ("board", "board_test"):
+            return "board"
+        return "classify"
 
     @staticmethod
     def _record_is_test(record: dict) -> bool:
-        return record.get("type") in ("test", "detect_test")
+        return record.get("type") in ("test", "detect_test", "board_test")
 
     @staticmethod
     def _evaluation_label(record: dict) -> str:
         when = record.get("finished_at", "?")
+        if record.get("type") == "board_test":
+            error = record.get("corner_error")
+            return (f"Board model exam {when} (pose mAP50 {record.get('mAP50', 0) * 100:.1f}%"
+                    + (f", corner error {error:.2f}%" if error is not None else "") + ")")
+        if record.get("type") == "board":
+            map50 = (record.get("metrics") or {}).get("mAP50")
+            return f"Board model run {when}" + (f" (pose mAP50 {map50 * 100:.1f}%)"
+                                                if map50 is not None else "")
         if record.get("type") == "detect_test":
             return f"Detector exam {when} (mAP50 {record.get('mAP50', 0) * 100:.1f}%)"
         if record.get("type") == "detect":
@@ -1623,7 +1790,7 @@ class MainWindow(QMainWindow):
         self.cm_canvas.show_message("Confusion Matrix", "Waiting for the first validation step")
         self.cm_norm_canvas.show_message("Normalized Confusion Matrix",
                                          "Waiting for the first validation step")
-        if self.task == "detect":
+        if self.yolo_task:
             self.precision_canvas.plot_detection_history([])
         else:
             self.precision_canvas.plot_precision([])

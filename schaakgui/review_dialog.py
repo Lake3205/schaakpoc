@@ -30,14 +30,18 @@ from PyQt6.QtWidgets import (
 
 from .checkpoint import load_checkpoint, model_from_checkpoint
 from .data import MultiFolderImageDataset, build_eval_transform, resolve_placeholder_classes
-from .detector import (
+from .detector import (  # noqa: F401 - ImageTester is re-exported for older imports
     AGREE_RGB,
     DetectionReviewSession,
+    ImageTester,
     draw_detections,
     load_picture,
     load_yolo_detector,
 )
+from .render import draw_corners
 
+CORNER_PRED_RGB = (0, 200, 83)
+CORNER_TRUTH_RGB = (41, 121, 255)
 PICTURE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff);;All files (*)"
 EMPTY_AREA_STYLE = ("border: 3px dashed #90a4ae; border-radius: 12px; color: #607d8b; "
                     "font-size: 18px; background: #f5f7f8;")
@@ -60,37 +64,6 @@ def to_pixmap(image: Image.Image, size: int = 400) -> QPixmap:
         pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation)
     return pixmap
-
-
-class ImageTester:
-    """Picture test (Qt independent): a YOLO detector boxes and names every piece by itself."""
-
-    def __init__(self, detector_path: Optional[str | Path] = None):
-        self.detector = None
-        self.detector_path: Optional[str] = None
-        if detector_path:
-            self.load_detector(detector_path)
-
-    def load_detector(self, path: str | Path):
-        self.detector = load_yolo_detector(path)
-        self.detector_path = str(path)
-
-    def detect(self, image: Image.Image, conf: float) -> list[dict]:
-        device = 0 if torch.cuda.is_available() else "cpu"
-        result = self.detector(image, conf=conf, device=device, verbose=False)[0]
-        boxes = result.boxes
-        return [{"box": tuple(float(v) for v in xyxy), "detector": (result.names[int(c)], float(p))}
-                for xyxy, p, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist())]
-
-    def predict_file(self, path: str | Path, conf: float = 0.25) -> dict:
-        if self.detector is None:
-            raise ValueError("No YOLO detector loaded: train or import a project detector first.")
-        image = load_picture(path)
-        detections = sorted(self.detect(image, conf), key=lambda d: (d["box"][1], d["box"][0]))
-        for d in detections:
-            d["label"], d["conf"] = d["detector"]
-        return {"path": str(path), "image": image, "detections": detections,
-                "annotated": draw_detections(image, detections)}
 
 
 class ReviewSession:
@@ -253,13 +226,23 @@ class DetectionReviewDialog(QDialog):
     def _show(self, result: dict):
         c = result["counts"]
         color = "#2e7d32" if c["perfect"] else "#c62828"
-        self.pred_image.setPixmap(to_pixmap(result["pred_image"], 580))
-        self.truth_image.setPixmap(to_pixmap(result["truth_image"], 580))
+        pred_image, truth_image = result["pred_image"], result["truth_image"]
+        corner_text = ""
+        if "pred_corners" in result:  # board corner (pose) model: show the 4 corners
+            pred_image = draw_corners(pred_image, result["pred_corners"], CORNER_PRED_RGB)
+            truth_image = draw_corners(truth_image, result["truth_corners"], CORNER_TRUTH_RGB)
+            error = result.get("corner_error")
+            corner_text = ("  ·  Corners: not found" if result["pred_corners"] is None else
+                           f"  ·  Corner error: {error:.2f}% of the board diagonal" if error is not None
+                           else "")
+        self.pred_image.setPixmap(to_pixmap(pred_image, 580))
+        self.truth_image.setPixmap(to_pixmap(truth_image, 580))
         self.badge.setText(("ALL CORRECT" if c["perfect"] else "MISTAKES")
                            + f" – {c['correct']} / {c['truths']} objects correct")
         self.badge.setStyleSheet(f"background: {color}; color: white; font-weight: bold; padding: 4px;")
         self.details.setText(f"Wrong class: {c['wrong_class']}  ·  Missed: {c['missed']}  ·  "
-                             f"Extra boxes: {c['extra']}<br><small>{html.escape(result['path'])}</small>")
+                             f"Extra boxes: {c['extra']}{corner_text}"
+                             f"<br><small>{html.escape(result['path'])}</small>")
         self.counter.setText(f"image {self.session.position + 1} / {len(self.session.history)}")
         self.prev_button.setEnabled(self.session.position > 0)
 
