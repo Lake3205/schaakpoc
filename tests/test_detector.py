@@ -13,10 +13,40 @@ from schaakgui.detector import (
     list_detectors,
     load_yolo_detector,
     match_boxes,
+    model_name,
     read_run_info,
+    rename_model,
     ultralytics_augmentation,
 )
 from schaakgui.projects import AugmentationConfig, DetectorConfig
+from schaakgui.review_dialog import model_label
+
+
+def test_rename_model_names_without_moving_files(tmp_path):
+    root = tmp_path / "proj" / "checkpoints" / "detectors"
+    trained = root / "detector_1" / "weights" / "best.pt"
+    imported = root / "imported_x.pt"
+    board = tmp_path / "proj" / "checkpoints" / "boards" / "board_1" / "weights" / "best.pt"
+    for path in (trained, imported, board):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+
+    rename_model(trained, "  pieces   v2 ")
+    rename_model(imported, "old one")
+    rename_model(board, "garden board")
+    assert model_name(trained) == "pieces v2" and model_name(imported) == "old one"
+    assert model_name(board) == "garden board"
+    assert model_label(str(trained)) == "pieces v2  (detector_1/weights/best.pt)"
+    assert trained.is_file() and list_detectors(tmp_path / "proj")  # names file is not a model
+
+    rename_model(trained, "")
+    assert model_name(trained) is None and model_name(imported) == "old one"
+    assert model_label(str(trained)) == "detector_1/weights/best.pt"
+    outside = tmp_path / "loose.pt"
+    outside.write_bytes(b"x")
+    assert model_name(outside) is None
+    with pytest.raises(ValueError):
+        rename_model(outside, "nope")
 
 
 def test_build_data_yaml_merges_yolo_splits(tmp_path):

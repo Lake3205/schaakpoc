@@ -1,3 +1,4 @@
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ import torch
 from PIL import Image
 
 pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
-from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 
 import schaakgui.detector as detector_module  # noqa: E402
 import schaakgui.review_dialog as review_dialog_module  # noqa: E402
@@ -42,6 +43,31 @@ def wait_until(app, predicate, timeout=120):
         app.processEvents()
         assert time.time() < end, "timeout"
         time.sleep(0.01)
+
+
+def test_rename_model_button_opens_dialog(app, tmp_path, monkeypatch):
+    manager = ProjectManager(tmp_path / ".projects")
+    window = MainWindow(manager)
+    weights = manager.project_dir(window.project.name) / "checkpoints" / "detectors" / "model.pt"
+    weights.parent.mkdir(parents=True, exist_ok=True)
+    weights.write_bytes(b"weights")
+    window.refresh_checkpoints(select=str(weights.resolve()))
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *args: errors.append(args[1]))
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("My detector", True))
+
+    window.rename_model_button.click()
+
+    assert not errors
+    assert detector_module.model_name(weights) == "My detector"
+    assert window.selected_checkpoint() == str(weights.resolve())
+    assert window.checkpoint_list.currentItem().text().startswith("My detector")
+
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("", False))
+    window.rename_model_button.click()
+    assert not errors
+    assert detector_module.model_name(weights) == "My detector"
+    window.close()
 
 
 def test_full_gui_workflow(app, datasets, tmp_path, monkeypatch):
@@ -250,6 +276,10 @@ def test_detection_gui_workflow(app, tmp_path, monkeypatch):
     assert "Training finished: all epochs completed" in messages[-1]
     weights = window.project_detectors()[0]
     assert window.checkpoint_list.count() == 1 and window.selected_checkpoint() == weights
+    assert window.rename_selected_model("king finder")
+    assert window.checkpoint_list.currentItem().text().startswith("king finder")
+    assert window.selected_checkpoint() == weights
+    assert "<b>Name:</b> king finder" in window.provenance_label.text()
     assert "Started from:</b> yolo26n.yaml" in window.provenance_label.text()
     assert window.project.evaluations[-1]["type"] == "detect"
     assert window.project.evaluations[-1]["classes"] == ["black-king", "white-king", "background"]

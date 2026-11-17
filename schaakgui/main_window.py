@@ -53,7 +53,9 @@ from .detector import (
     evaluate_detector,
     import_model,
     list_models,
+    model_name,
     read_run_info,
+    rename_model,
     ultralytics_augmentation,
 )
 from .engine import TrainJob, evaluate_checkpoint
@@ -518,10 +520,17 @@ class MainWindow(QMainWindow):
         self.saved_box = saved = QGroupBox("Saved models in this project")
         saved_layout = QVBoxLayout(saved)
         self.checkpoint_list = QListWidget()
-        self.checkpoint_list.currentTextChanged.connect(self.show_provenance)
+        self.checkpoint_list.currentItemChanged.connect(
+            lambda item, _previous: self.show_provenance(self._item_path(item) or ""))
+        self.checkpoint_list.itemDoubleClicked.connect(lambda _item: self.rename_selected_model()
+                                                       if self.yolo_task else None)
         row = QHBoxLayout()
         refresh = QPushButton("Refresh")
         use = QPushButton("Use for resume")
+        self.rename_model_button = QPushButton("Rename…")
+        self.rename_model_button.setToolTip("Give the selected model a name so you can find it back "
+                                            "easily (the file itself is not moved). Double-click works too.")
+        self.rename_model_button.clicked.connect(lambda _checked: self.rename_selected_model())
         self.import_detector_button = QPushButton("Import detector…")
         self.import_detector_button.setToolTip("Copy existing YOLO detector weights (e.g. from "
                                                "train.py runs) into this project.")
@@ -530,6 +539,7 @@ class MainWindow(QMainWindow):
         self.import_detector_button.clicked.connect(self.browse_import_detector)
         row.addWidget(refresh)
         row.addWidget(use)
+        row.addWidget(self.rename_model_button)
         row.addWidget(self.import_detector_button)
         row.addStretch()
         saved_layout.addWidget(self.checkpoint_list)
@@ -950,6 +960,7 @@ class MainWindow(QMainWindow):
                                 else "Saved models in this project")
         self.import_detector_button.setText(f"Import {kind}…")
         self.import_detector_button.setVisible(detect)
+        self.rename_model_button.setVisible(detect)
 
     def _safe_counts(self, folders: list[str]) -> dict[str, int]:
         existing = [f for f in folders if Path(f).is_dir()]
@@ -1186,7 +1197,7 @@ class MainWindow(QMainWindow):
     def refresh_checkpoints(self, select: Optional[str] = None):
         if self.project is None:
             return
-        current = select or self.checkpoint_list.currentItem() and self.checkpoint_list.currentItem().text()
+        current = select or self.selected_checkpoint()
         self.checkpoint_list.blockSignals(True)
         self.checkpoint_list.clear()
         if self.yolo_task:
@@ -1196,22 +1207,50 @@ class MainWindow(QMainWindow):
         else:
             paths = self.manager.list_checkpoints(self.project)
             fallback = self.project.resume_checkpoint
-        self.checkpoint_list.addItems(paths)
+        for path in paths:
+            name = model_name(path) if self.yolo_task else None
+            item = QListWidgetItem(f"{name}  —  {path}" if name else path)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            self.checkpoint_list.addItem(item)
         self.checkpoint_list.blockSignals(False)
         if current in paths:
             self.checkpoint_list.setCurrentRow(paths.index(current))
         else:
             self.show_provenance(fallback or "")
 
+    @staticmethod
+    def _item_path(item: Optional[QListWidgetItem]) -> Optional[str]:
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
     def use_selected_for_resume(self):
-        item = self.checkpoint_list.currentItem()
-        if item is not None:
-            self.resume_edit.setText(item.text())
+        path = self.selected_checkpoint()
+        if path:
+            self.resume_edit.setText(path)
             self.resume_check.setChecked(True)
 
     def selected_checkpoint(self) -> Optional[str]:
-        item = self.checkpoint_list.currentItem()
-        return item.text() if item is not None else None
+        return self._item_path(self.checkpoint_list.currentItem())
+
+    def rename_selected_model(self, name: Optional[str] = None) -> bool:
+        """Name the selected detector / board model (asks when ``name`` is None; empty clears it)."""
+        path = self.selected_checkpoint()
+        if not path or not self.yolo_task:
+            QMessageBox.information(self, "Rename", "Select a saved detector or board model first.")
+            return False
+        if name is None:
+            name, ok = QInputDialog.getText(self, "Rename model",
+                                            f"Name for {Path(path).name} (empty = no name):",
+                                            text=model_name(path) or "")
+            if not ok:
+                return False
+        try:
+            rename_model(path, name)
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, "Rename", f"Cannot rename the model:\n{e}")
+            return False
+        self.refresh_checkpoints(select=path)
+        return True
 
     def _clear_milestones(self):
         while self.milestone_container.count():
@@ -1264,6 +1303,9 @@ class MainWindow(QMainWindow):
         esc = html.escape
         info = read_run_info(path)
         parts = [f"<b>Detector:</b> {esc(path)}"]
+        name = model_name(path)
+        if name:
+            parts.insert(0, f"<b>Name:</b> {esc(name)}")
         if info is None:
             parts.append("Imported weights (no training record from this app).")
             return "<br>".join(parts)

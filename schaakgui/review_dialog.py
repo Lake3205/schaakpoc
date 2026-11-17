@@ -37,6 +37,7 @@ from .detector import (  # noqa: F401 - ImageTester is re-exported for older imp
     draw_detections,
     load_picture,
     load_yolo_detector,
+    model_name,
 )
 from .render import draw_corners
 
@@ -248,14 +249,18 @@ class DetectionReviewDialog(QDialog):
 
 
 def model_label(path: str) -> str:
-    """Short name of a model file, relative to its project's ``checkpoints`` folder when possible."""
+    """Short name of a model file, relative to its project's ``checkpoints`` folder when possible,
+    prefixed with the name the user gave it."""
     parts = Path(path).parts
     if "checkpoints" in parts:
         rel = parts[len(parts) - parts[::-1].index("checkpoints"):]
         if rel and rel[0] == "detectors":
             rel = rel[1:]
-        return "/".join(rel)
-    return Path(path).name
+        short = "/".join(rel)
+    else:
+        short = Path(path).name
+    name = model_name(path)
+    return f"{name}  ({short})" if name else short
 
 
 class PictureArea(QLabel):

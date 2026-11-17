@@ -4,6 +4,7 @@ Detectors live in ``<project>/checkpoints/detectors/``: in-app trainings in
 ``detector_<stamp>/weights/best.pt`` (with ``schaakgui_run.json`` provenance) and imported weights as
 ``<name>.pt``. They are kept apart from the classifier checkpoints (a different checkpoint format).
 Board corner models (YOLO-pose, task ``board``) live the same way in ``checkpoints/boards/``.
+Display names given by the user are stored in ``model_names.json`` next to them.
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ POSE_METRIC_KEYS = {"precision": "metrics/precision(P)", "recall": "metrics/reca
 # Project task -> Ultralytics task and checkpoint folder.
 YOLO_TASKS = {"detect": "detect", "board": "pose"}
 MODEL_DIRS = {"detect": "detectors", "board": "boards"}
+MODEL_NAMES = "model_names.json"  # user-given display names, keyed by path relative to the models folder
 AGREE_RGB = (46, 125, 50)
 DISAGREE_RGB = (230, 81, 0)
 TRUTH_RGB = (21, 101, 192)
@@ -94,6 +96,46 @@ def list_models(project_dir: str | Path, task: str = "detect") -> list[str]:
     found = [p for p in root.glob("*/weights/best.pt")] + [p for p in root.glob("*.pt")]
     found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return [str(p.resolve()) for p in found]
+
+
+def _names_file(weights: Path) -> Optional[tuple[Path, str]]:
+    """(``model_names.json`` of the models folder holding ``weights``, key of the weights in it)."""
+    for root in (weights.parent, weights.parent.parent.parent):
+        if root.name in MODEL_DIRS.values() and root.parent.name == "checkpoints":
+            return root / MODEL_NAMES, weights.relative_to(root).as_posix()
+    return None
+
+
+def _read_names(path: Path) -> dict[str, str]:
+    try:
+        names = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return names if isinstance(names, dict) else {}
+
+
+def model_name(weights: str | Path) -> Optional[str]:
+    """Name the user gave to project YOLO weights, if any."""
+    found = _names_file(Path(weights).resolve())
+    return _read_names(found[0]).get(found[1]) if found else None
+
+
+def rename_model(weights: str | Path, name: str) -> None:
+    """Give project YOLO weights a display name (empty name removes it); the file is not moved."""
+    weights = Path(weights).resolve()
+    found = _names_file(weights)
+    if found is None:
+        raise ValueError(f"{weights} is not a model of a project (checkpoints/detectors or boards)")
+    path, key = found
+    names = _read_names(path)
+    name = " ".join(name.split())
+    if name:
+        names[key] = name
+    else:
+        names.pop(key, None)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(names, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
 
 
 def list_detectors(project_dir: str | Path) -> list[str]:
